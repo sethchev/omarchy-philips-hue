@@ -14,11 +14,12 @@ ok()   { printf '\033[1;32m::\033[0m %s\n' "$*"; }
 err()  { printf '\033[1;31m::\033[0m %s\n' "$*" >&2; }
 
 valid_ip() {
-  local IFS='.' parts=($1)
+  local IFS='.'
+  local parts=($1)
   [[ ${#parts[@]} -eq 4 ]] || return 1
   for part in "${parts[@]}"; do
     [[ "$part" =~ ^[0-9]{1,3}$ ]] || return 1
-    (( part >= 0 && part <= 255 )) || return 1
+    (( 10#$part >= 0 && 10#$part <= 255 )) || return 1
   done
 }
 
