@@ -761,7 +761,7 @@ Panel {
                 id: headerText
                 anchors.verticalCenter: parent.verticalCenter
                 text: "Empty rooms (" + root.emptyRoomCount + ")"
-                color: Qt.darker(root.bar.foreground, 1.4)
+                color: headerMouse.containsMouse ? Color.accent : Qt.darker(root.bar.foreground, 1.4)
                 font.family: root.bar.fontFamily
                 font.pixelSize: Style.font.caption
                 font.letterSpacing: 1
@@ -771,14 +771,16 @@ Panel {
               Text {
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
-                text: emptyRoomsSection.expanded ? "" : ""
-                color: Qt.darker(root.bar.foreground, 1.4)
+                text: emptyRoomsSection.expanded ? "\u25be" : "\u25b8"
+                color: headerMouse.containsMouse ? Color.accent : Qt.darker(root.bar.foreground, 1.4)
                 font.family: root.bar.fontFamily
                 font.pixelSize: Style.font.caption
               }
 
               MouseArea {
+                id: headerMouse
                 anchors.fill: parent
+                hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
                 onClicked: emptyRoomsSection.expanded = !emptyRoomsSection.expanded
               }
