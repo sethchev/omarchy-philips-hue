@@ -36,7 +36,7 @@ Panel {
     if (root.config === null) return "Not paired"
     if (root.lastFetchFailed) return "Bridge unreachable"
     if (root.loading) return "Loading…"
-    var roomLabel = root.roomCount + " room" + (root.roomCount === 1 ? "" : "s")
+    var roomLabel = root.lightedRoomCount + " room" + (root.lightedRoomCount === 1 ? "" : "s")
     return roomLabel + " · " + root.lightTotal + " light" + (root.lightTotal === 1 ? "" : "s")
   }
 
@@ -616,7 +616,7 @@ Panel {
             spacing: Style.space(4)
 
             Repeater {
-              model: root.roomsWithLights
+              model: root.lightedRooms()
 
               Column {
                 id: roomColumn
@@ -745,85 +745,125 @@ Panel {
             }
           }
 
-          Column {
+          Item {
             id: emptyRoomsSection
             visible: root.config !== null && root.emptyRoomCount > 0
             width: parent.width
-            spacing: Style.space(2)
+            height: emptyRoomsInner.height + Style.space(16)
 
             property bool expanded: false
 
-            Item {
-              width: parent.width
-              height: headerText.implicitHeight
+            Rectangle {
+              anchors.fill: parent
+              radius: Style.space(8)
+              color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b,
+                headerMouse.containsMouse || emptyRoomsSection.expanded ? 0.10 : 0.05)
+              border.width: 1
+              border.color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b,
+                headerMouse.containsMouse || emptyRoomsSection.expanded ? 0.32 : 0.16)
+            }
 
-              Text {
-                id: headerText
-                anchors.verticalCenter: parent.verticalCenter
-                text: "Empty rooms (" + root.emptyRoomCount + ")"
-                color: headerMouse.containsMouse ? Color.accent : Qt.darker(root.bar.foreground, 1.4)
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.caption
-                font.letterSpacing: 1
-                font.bold: true
-              }
+            MouseArea {
+              id: headerMouse
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.top: parent.top
+              anchors.margins: Style.space(8)
+              height: headerRow.height
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: emptyRoomsSection.expanded = !emptyRoomsSection.expanded
+            }
 
-              Text {
-                anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
-                text: emptyRoomsSection.expanded ? "\u25be" : "\u25b8"
-                color: headerMouse.containsMouse ? Color.accent : Qt.darker(root.bar.foreground, 1.4)
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.caption
-              }
-
-              MouseArea {
-                id: headerMouse
-                anchors.fill: parent
-                hoverEnabled: true
-                cursorShape: Qt.PointingHandCursor
-                onClicked: emptyRoomsSection.expanded = !emptyRoomsSection.expanded
-              }
+            Text {
+              anchors.right: parent.right
+              anchors.rightMargin: Style.space(10)
+              y: Style.space(8) + (headerRow.height - height) / 2
+              text: "\u25b8"
+              color: headerMouse.containsMouse ? Color.accent : Qt.darker(root.bar.foreground, 1.4)
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.body
+              rotation: emptyRoomsSection.expanded ? 90 : 0
+              transformOrigin: Item.Center
+              Behavior on rotation { NumberAnimation { duration: 120 } }
             }
 
             Column {
-              visible: emptyRoomsSection.expanded
-              width: parent.width
-              spacing: Style.space(2)
+              id: emptyRoomsInner
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.top: parent.top
+              anchors.margins: Style.space(8)
+              spacing: Style.space(6)
 
-              Repeater {
-                model: root.emptyRooms()
+              Row {
+                id: headerRow
+                width: parent.width
+                spacing: Style.space(6)
 
-                Column {
-                  id: emptyRoomRow
-                  required property var modelData
+                Text {
+                  text: "Empty rooms"
+                  color: headerMouse.containsMouse ? Color.accent : root.bar.foreground
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: Style.font.body
+                  font.bold: true
+                }
+
+                Text {
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: "(" + root.emptyRoomCount + ")"
+                  color: Qt.darker(root.bar.foreground, 1.4)
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+              }
+
+              Column {
+                visible: emptyRoomsSection.expanded
+                width: parent.width
+                spacing: Style.space(4)
+
+                Rectangle {
                   width: parent.width
-                  spacing: Style.space(2)
+                  height: Style.spacing.hairline
+                  color: root.bar.foreground
+                  opacity: 0.12
+                }
 
-                  Toggle {
-                    width: parent.width
-                    label: modelData.name
-                    checked: modelData.on
-                    foreground: root.bar.foreground
-                    accent: Color.accent
-                    fontFamily: root.bar.fontFamily
-                    onClicked: root.toggleRoom(modelData.id, !modelData.on)
-                  }
+                Repeater {
+                  model: root.emptyRooms()
 
-                  Toggle {
-                    visible: modelData.on
+                  Column {
+                    id: emptyRoomRow
+                    required property var modelData
                     width: parent.width
-                    label: "Theme Sync"
-                    checked: root.themeSync[modelData.id] !== false
-                    foreground: root.bar.foreground
-                    accent: Color.accent
-                    fontFamily: root.bar.fontFamily
-                    onClicked: {
-                      var ts = JSON.parse(JSON.stringify(root.themeSync))
-                      ts[modelData.id] = ts[modelData.id] === false
-                      root.themeSync = ts
-                      actionProc.command = HueApi.apiCmd(["write-theme-config", JSON.stringify(ts)])
-                      actionProc.running = true
+                    spacing: Style.space(2)
+
+                    Toggle {
+                      width: parent.width
+                      label: modelData.name
+                      checked: modelData.on
+                      foreground: root.bar.foreground
+                      accent: Color.accent
+                      fontFamily: root.bar.fontFamily
+                      onClicked: root.toggleRoom(modelData.id, !modelData.on)
+                    }
+
+                    Toggle {
+                      visible: modelData.on
+                      width: parent.width
+                      label: "Theme Sync"
+                      checked: root.themeSync[modelData.id] !== false
+                      foreground: root.bar.foreground
+                      accent: Color.accent
+                      fontFamily: root.bar.fontFamily
+                      onClicked: {
+                        var ts = JSON.parse(JSON.stringify(root.themeSync))
+                        ts[modelData.id] = ts[modelData.id] === false
+                        root.themeSync = ts
+                        actionProc.command = HueApi.apiCmd(["write-theme-config", JSON.stringify(ts)])
+                        actionProc.running = true
+                      }
                     }
                   }
                 }
