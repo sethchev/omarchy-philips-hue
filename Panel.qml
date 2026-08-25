@@ -24,6 +24,7 @@ Panel {
   property bool loading: false
   property bool lastFetchFailed: false
   property var actionQueue: []
+  property var expandedRooms: ({})
 
   readonly property int roomCount: root.roomsWithLights.length
   readonly property int lightTotal: root.lightsTotal()
@@ -238,6 +239,16 @@ Panel {
 
   function roomSyncOn(roomId) {
     return root.themeSync[roomId] !== false
+  }
+
+  function roomExpanded(roomId) {
+    return root.expandedRooms[roomId] === true
+  }
+
+  function toggleRoomExpanded(roomId) {
+    var map = JSON.parse(JSON.stringify(root.expandedRooms))
+    map[roomId] = map[roomId] !== true
+    root.expandedRooms = map
   }
 
   function toggleColorPicker(lightId) {
@@ -621,21 +632,62 @@ Panel {
               Column {
                 id: roomColumn
                 required property var modelData
+                readonly property bool lightsOpen: root.roomExpanded(modelData.id)
                 width: parent.width
                 spacing: Style.space(2)
 
-                Toggle {
+                Item {
                   width: parent.width
-                  label: modelData.name + " (" + modelData.lightCount + ")"
-                  checked: modelData.on
-                  foreground: root.bar.foreground
-                  accent: Color.accent
-                  fontFamily: root.bar.fontFamily
-                  onClicked: root.toggleRoom(modelData.id, !modelData.on)
+                  height: Math.max(roomHeaderToggle.height, discloseButton.height)
+
+                  Toggle {
+                    id: roomHeaderToggle
+                    width: parent.width - Style.space(28)
+                    label: modelData.name + " (" + modelData.lightCount + ")"
+                    checked: modelData.on
+                    foreground: root.bar.foreground
+                    accent: Color.accent
+                    fontFamily: root.bar.fontFamily
+                    onClicked: root.toggleRoom(modelData.id, !modelData.on)
+                  }
+
+                  Rectangle {
+                    id: discloseButton
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: Style.space(22)
+                    height: Style.space(22)
+                    radius: Style.space(5)
+                    color: discloseMouse.containsMouse || roomColumn.lightsOpen
+                      ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.12)
+                      : Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.05)
+                    border.width: 1
+                    border.color: roomColumn.lightsOpen
+                      ? Color.accent
+                      : Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.25)
+
+                    Text {
+                      anchors.centerIn: parent
+                      text: "\u25b8"
+                      color: roomColumn.lightsOpen ? Color.accent : Qt.darker(root.bar.foreground, 1.4)
+                      font.family: root.bar.fontFamily
+                      font.pixelSize: Style.font.caption
+                      rotation: roomColumn.lightsOpen ? 90 : 0
+                      Behavior on rotation { NumberAnimation { duration: 120 } }
+                    }
+
+                    MouseArea {
+                      id: discloseMouse
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.toggleRoomExpanded(roomColumn.modelData.id)
+                    }
+                  }
                 }
 
                 Toggle {
-                  visible: modelData.on
+                  visible: modelData.on && roomColumn.lightsOpen
                   width: parent.width
                   label: "Theme Sync"
                   checked: root.themeSync[modelData.id] !== false
@@ -658,6 +710,7 @@ Panel {
                     id: roomLightRow
                     required property var modelData
                     readonly property bool themeSynced: root.roomSyncOn(roomColumn.modelData.id)
+                    visible: roomColumn.lightsOpen
                     width: parent.width
                     spacing: Style.space(1)
 

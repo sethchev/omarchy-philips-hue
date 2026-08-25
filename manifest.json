@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "omarchy-philips-hue",
   "name": "Omarchy Hue Light Control and Theme Sync",
-  "version": "1.2.1",
+  "version": "1.3.0",
   "author": "sethchev",
   "license": "MIT",
   "description": "Control Philips Hue lights from the bar connected to Hue Bridge. Syncs with your active Omarchy theme!",
