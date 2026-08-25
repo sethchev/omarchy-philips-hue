@@ -636,35 +636,57 @@ Panel {
                 width: parent.width
                 spacing: Style.space(2)
 
-                Item {
+                BorderSurface {
+                  id: roomHeader
                   width: parent.width
-                  height: Math.max(roomHeaderToggle.height, discloseButton.height)
+                  radius: Style.cornerRadius
+                  implicitHeight: Math.max(54, Style.font.subtitle + Style.spacing.huge)
+                  readonly property bool hot: headerMouse.containsMouse
+                  color: Style.controlFill(false, roomHeader.hot, root.bar.foreground, Color.accent)
+                  borderSpec: Border.controlSpec(
+                    roomHeader.hot ? "hover-cursor" : "normal",
+                    root.bar.foreground, Color.accent)
+                  Behavior on color { ColorAnimation { duration: 100 } }
 
-                  Toggle {
-                    id: roomHeaderToggle
-                    width: parent.width - Style.space(28)
-                    label: modelData.name + " (" + modelData.lightCount + ")"
-                    checked: modelData.on
+                  activeFocusOnTab: true
+                  Keys.onReturnPressed: root.toggleRoom(roomColumn.modelData.id, !roomColumn.modelData.on)
+                  Keys.onEnterPressed: root.toggleRoom(roomColumn.modelData.id, !roomColumn.modelData.on)
+                  Keys.onSpacePressed: root.toggleRoom(roomColumn.modelData.id, !roomColumn.modelData.on)
+
+                  MouseArea {
+                    id: headerMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.toggleRoom(roomColumn.modelData.id, !roomColumn.modelData.on)
+                  }
+
+                  ToggleSwitch {
+                    id: powerTrack
+                    anchors.right: parent.right
+                    anchors.rightMargin: parent.borderRight + Style.spacing.rowPaddingX
+                    anchors.verticalCenter: parent.verticalCenter
+                    checked: roomColumn.modelData.on
                     foreground: root.bar.foreground
                     accent: Color.accent
-                    fontFamily: root.bar.fontFamily
-                    onClicked: root.toggleRoom(modelData.id, !modelData.on)
+                    interactive: false
                   }
 
                   Rectangle {
-                    id: discloseButton
-                    anchors.right: parent.right
+                    id: discButton
+                    anchors.right: powerTrack.left
+                    anchors.rightMargin: Style.spacing.rowPaddingX
                     anchors.verticalCenter: parent.verticalCenter
                     width: Style.space(22)
                     height: Style.space(22)
                     radius: Style.space(5)
-                    color: discloseMouse.containsMouse || roomColumn.lightsOpen
-                      ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.12)
-                      : Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.05)
+                    color: discMouse.containsMouse || roomColumn.lightsOpen
+                      ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.14)
+                      : Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.06)
                     border.width: 1
                     border.color: roomColumn.lightsOpen
                       ? Color.accent
-                      : Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.25)
+                      : Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.28)
 
                     Text {
                       anchors.centerIn: parent
@@ -677,12 +699,26 @@ Panel {
                     }
 
                     MouseArea {
-                      id: discloseMouse
+                      id: discMouse
                       anchors.fill: parent
                       hoverEnabled: true
                       cursorShape: Qt.PointingHandCursor
                       onClicked: root.toggleRoomExpanded(roomColumn.modelData.id)
                     }
+                  }
+
+                  Text {
+                    anchors.left: parent.left
+                    anchors.leftMargin: parent.borderLeft + Style.spacing.rowPaddingX
+                    anchors.right: discButton.left
+                    anchors.rightMargin: Style.spacing.rowPaddingX
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: roomColumn.modelData.name + " (" + roomColumn.modelData.lightCount + ")"
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.subtitle
+                    font.bold: true
+                    elide: Text.ElideRight
                   }
                 }
 
