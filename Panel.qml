@@ -28,6 +28,7 @@ Panel {
   readonly property int roomCount: root.roomsWithLights.length
   readonly property int lightTotal: root.lightsTotal()
   readonly property int lightedRoomCount: root.lightedRooms().length
+  readonly property int emptyRoomCount: root.emptyRooms().length
   readonly property bool allLightsOn: root.computeAllLightsOn()
   readonly property bool insecureMode: root.config !== null && !root.config.bridgeId
 
@@ -52,6 +53,14 @@ Panel {
     var result = []
     for (var i = 0; i < root.roomsWithLights.length; i++) {
       if (root.roomsWithLights[i].lightCount > 0) result.push(root.roomsWithLights[i])
+    }
+    return result
+  }
+
+  function emptyRooms() {
+    var result = []
+    for (var i = 0; i < root.roomsWithLights.length; i++) {
+      if (root.roomsWithLights[i].lightCount === 0) result.push(root.roomsWithLights[i])
     }
     return result
   }
@@ -729,6 +738,90 @@ Panel {
                       step: 10
                       value: modelData.ct
                       onReleased: function(v) { root.setColorTemperature(modelData.id, v) }
+                    }
+                  }
+                }
+              }
+            }
+          }
+
+          Column {
+            id: emptyRoomsSection
+            visible: root.config !== null && root.emptyRoomCount > 0
+            width: parent.width
+            spacing: Style.space(2)
+
+            property bool expanded: false
+
+            Item {
+              width: parent.width
+              height: headerText.implicitHeight
+
+              Text {
+                id: headerText
+                anchors.verticalCenter: parent.verticalCenter
+                text: "Empty rooms (" + root.emptyRoomCount + ")"
+                color: Qt.darker(root.bar.foreground, 1.4)
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.caption
+                font.letterSpacing: 1
+                font.bold: true
+              }
+
+              Text {
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                text: emptyRoomsSection.expanded ? "" : ""
+                color: Qt.darker(root.bar.foreground, 1.4)
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+
+              MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: emptyRoomsSection.expanded = !emptyRoomsSection.expanded
+              }
+            }
+
+            Column {
+              visible: emptyRoomsSection.expanded
+              width: parent.width
+              spacing: Style.space(2)
+
+              Repeater {
+                model: root.emptyRooms()
+
+                Column {
+                  id: emptyRoomRow
+                  required property var modelData
+                  width: parent.width
+                  spacing: Style.space(2)
+
+                  Toggle {
+                    width: parent.width
+                    label: modelData.name
+                    checked: modelData.on
+                    foreground: root.bar.foreground
+                    accent: Color.accent
+                    fontFamily: root.bar.fontFamily
+                    onClicked: root.toggleRoom(modelData.id, !modelData.on)
+                  }
+
+                  Toggle {
+                    visible: modelData.on
+                    width: parent.width
+                    label: "Theme Sync"
+                    checked: root.themeSync[modelData.id] !== false
+                    foreground: root.bar.foreground
+                    accent: Color.accent
+                    fontFamily: root.bar.fontFamily
+                    onClicked: {
+                      var ts = JSON.parse(JSON.stringify(root.themeSync))
+                      ts[modelData.id] = ts[modelData.id] === false
+                      root.themeSync = ts
+                      actionProc.command = HueApi.apiCmd(["write-theme-config", JSON.stringify(ts)])
+                      actionProc.running = true
                     }
                   }
                 }
