@@ -1,4 +1,6 @@
 import QtQuick
+import Quickshell
+import qs.Commons
 import qs.Ui
 
 Item {
