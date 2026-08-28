@@ -107,7 +107,11 @@ def main():
     op = sys.argv[1]
 
     if op == "write-theme-config" and len(sys.argv) >= 3:
-        _write_theme_config(sys.argv[2])
+        _write_config_map("themeSync", sys.argv[2])
+        return
+
+    if op == "write-scene-config" and len(sys.argv) >= 3:
+        _write_config_map("sceneRooms", sys.argv[2])
         return
 
     creds = _load_creds()
@@ -133,14 +137,14 @@ def main():
         print(len(lights))
 
 
-def _write_theme_config(ts_json):
-    ts = json.loads(ts_json)
-    if not isinstance(ts, dict):
+def _write_config_map(key, map_json):
+    settings = json.loads(map_json)
+    if not isinstance(settings, dict):
         return
-    for rid in ts:
+    for rid in settings:
         if not re.fullmatch(r'[a-zA-Z0-9_-]{1,40}', str(rid)):
             return
-        if not isinstance(ts[rid], bool):
+        if not isinstance(settings[rid], bool):
             return
     config_path = os.path.join(
         os.path.expanduser("~"), ".config/omarchy/settings/hue-theme.json")
@@ -154,7 +158,7 @@ def _write_theme_config(ts_json):
             cfg = {}
     except (OSError, ValueError):
         pass
-    cfg["themeSync"] = ts
+    cfg[key] = settings
     try:
         fd = os.open(config_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:

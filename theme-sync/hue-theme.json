@@ -4,5 +4,7 @@
   "groups": ["all"],
   "bri": null,
   "turnOn": false,
-  "themes": {}
+  "themes": {},
+  "scene": false,
+  "sceneRooms": {}
 }

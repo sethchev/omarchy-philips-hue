@@ -203,3 +203,14 @@ function roomColor(room) {
   }
   return lightColor(sample)
 }
+
+// Number of color-capable lights in a room. Theme scenes are only offered for
+// rooms with at least two of these.
+function roomColorLightCount(room) {
+  var lights = room && room.lights ? room.lights : []
+  var n = 0
+  for (var i = 0; i < lights.length; i++) {
+    if (lights[i].hasColor) n++
+  }
+  return n
+}

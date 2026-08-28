@@ -243,6 +243,18 @@ Panel {
     return root.themeSync[roomId] !== false
   }
 
+  // Effective scene-mode state for a room: per-room override, else the global
+  // "scene" default from hue-theme.json.
+  function roomSceneDefault(roomId) {
+    return root.sceneRooms[roomId] !== undefined ? root.sceneRooms[roomId] : root.sceneDefault
+  }
+
+  // Scene Mode is only offered when the room is synced and has at least two
+  // color-capable lights (the hook's own threshold for building a scene).
+  function roomSceneApplies(room) {
+    return root.roomSyncOn(room.id) && HueApi.roomColorLightCount(room) >= 2
+  }
+
   function roomExpanded(roomId) {
     return root.expandedRooms[roomId] === true
   }
@@ -360,6 +372,8 @@ Panel {
   }
 
   property var themeSync: ({})
+  property var sceneRooms: ({})
+  property bool sceneDefault: false
   property FileView themeConfigFile: FileView {
     path: Quickshell.env("HOME") + "/.config/omarchy/settings/hue-theme.json"
     watchChanges: true
@@ -369,11 +383,19 @@ Panel {
       try {
         var parsed = JSON.parse(text())
         root.themeSync = parsed.themeSync || {}
+        root.sceneRooms = parsed.sceneRooms || {}
+        root.sceneDefault = parsed.scene === true
       } catch (e) {
         root.themeSync = {}
+        root.sceneRooms = {}
+        root.sceneDefault = false
       }
     }
-    onLoadFailed: root.themeSync = {}
+    onLoadFailed: {
+      root.themeSync = {}
+      root.sceneRooms = {}
+      root.sceneDefault = false
+    }
   }
 
   Timer {
@@ -729,20 +751,44 @@ Panel {
                   }
                 }
 
-                InlineToggle {
+                Row {
+                  id: syncRow
                   visible: modelData.on && roomColumn.lightsOpen
                   width: parent.width
-                  label: "Theme Sync"
-                  checked: root.themeSync[modelData.id] !== false
-                  foreground: root.bar.foreground
-                  accent: Color.accent
-                  fontFamily: root.bar.fontFamily
-                  onClicked: {
-                    var ts = JSON.parse(JSON.stringify(root.themeSync))
-                    ts[modelData.id] = ts[modelData.id] === false
-                    root.themeSync = ts
-                    actionProc.command = HueApi.apiCmd(["write-theme-config", JSON.stringify(ts)])
-                    actionProc.running = true
+                  spacing: Style.space(1)
+                  readonly property bool sceneUsable: root.roomSceneApplies(modelData)
+
+                  InlineToggle {
+                    width: syncRow.sceneUsable ? (parent.width - parent.spacing) / 2 : parent.width
+                    label: "Theme Sync"
+                    checked: root.themeSync[modelData.id] !== false
+                    foreground: root.bar.foreground
+                    accent: Color.accent
+                    fontFamily: root.bar.fontFamily
+                    onClicked: {
+                      var ts = JSON.parse(JSON.stringify(root.themeSync))
+                      ts[modelData.id] = ts[modelData.id] === false
+                      root.themeSync = ts
+                      actionProc.command = HueApi.apiCmd(["write-theme-config", JSON.stringify(ts)])
+                      actionProc.running = true
+                    }
+                  }
+
+                  InlineToggle {
+                    visible: syncRow.sceneUsable
+                    width: (parent.width - parent.spacing) / 2
+                    label: "Scene Mode"
+                    checked: root.roomSceneDefault(modelData.id)
+                    foreground: root.bar.foreground
+                    accent: Color.accent
+                    fontFamily: root.bar.fontFamily
+                    onClicked: {
+                      var ss = JSON.parse(JSON.stringify(root.sceneRooms))
+                      ss[modelData.id] = !root.roomSceneDefault(modelData.id)
+                      root.sceneRooms = ss
+                      actionProc.command = HueApi.apiCmd(["write-scene-config", JSON.stringify(ss)])
+                      actionProc.running = true
+                    }
                   }
                 }
 

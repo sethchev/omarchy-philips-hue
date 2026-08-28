@@ -190,6 +190,42 @@ def hex_to_hsv(hexval):
     return int(round(hue01 * 65535)) % 65536, int(round(sat * 254))
 
 
+def build_scene_palette(path):
+    """Ordered, de-duplicated scene palette from colors.toml: accent first,
+    then the named palette colors and any other plain hex keys in file order.
+    Surface / neutral keys (background, foreground, selection, borders,
+    tabs) are skipped so scenes stay colorful."""
+    named = set(("red", "green", "yellow", "blue", "magenta", "cyan",
+                 "bright_red", "bright_green", "bright_yellow",
+                 "bright_blue", "bright_magenta", "bright_cyan"))
+    order = []
+    values = {}
+    try:
+        with open(path) as f:
+            for raw in f:
+                m = re.match(
+                    r'^\s*([A-Za-z0-9_]+)\s*=\s*"#([0-9a-fA-F]{6})"\s*$', raw)
+                if m:
+                    values[m.group(1)] = m.group(2).lower()
+                    order.append(m.group(1))
+    except Exception:
+        return []
+    def skip(k):
+        return (k in ("selection", "muted")
+                or "background" in k or "foreground" in k
+                or "border" in k or "tab" in k)
+    keys = ([k for k in order if k == "accent"]
+            + [k for k in order if k in named]
+            + [k for k in order if k not in named and not skip(k)])
+    palette, seen = [], set()
+    for k in keys:
+        v = values.get(k)
+        if v and v not in seen:
+            seen.add(v)
+            palette.append(v)
+    return palette
+
+
 try:
     fd = os.open(creds_file, os.O_RDONLY | os.O_NOFOLLOW)
     try:
@@ -256,14 +292,66 @@ else:
 theme_sync = cfg.get("themeSync") or {}
 targets = [gid for gid in targets if theme_sync.get(gid, True)]
 
+# Theme scenes (opt-in): map the theme's palette onto each room's lights
+# instead of painting the whole group one uniform color.
+scene = bool(cfg.get("scene", False))
+scene_rooms = cfg.get("sceneRooms") or {}
+any_scene = scene or any(
+    isinstance(v, bool) and v for v in scene_rooms.values())
+palette_hs = []
+if any_scene:
+    palette = build_scene_palette(os.path.expanduser(
+        "~/.local/state/omarchy/current/theme/colors.toml"))
+    if palette:
+        palette[0] = color  # per-theme override re-colors the accent anchor
+        palette_hs = [hex_to_hsv(h) for h in palette]
+
 body = {"hue": hue, "sat": sat, "transitiontime": transition}
 if cfg.get("bri") is not None:
     body["bri"] = int(max(1, min(254, cfg["bri"])))
 if cfg.get("turnOn"):
     body["on"] = True
 
+lights = get_json(base + "/lights", hostname=hostname) or {}
+
+
+def has_color(lid):
+    st = lights.get(lid, {}).get("state") or {}
+    return (isinstance(st.get("hue"), (int, float))
+            and isinstance(st.get("sat"), (int, float)))
+
+
 sent = 0
+scenes = 0
 for gid in targets:
+    scene_ids = []
+    if scene_rooms.get(gid, scene) and palette_hs:
+        group = get_json(base + "/groups/%s" % gid, hostname=hostname)
+        if group and isinstance(group.get("lights"), list):
+            scene_ids = [lid for lid in group["lights"] if has_color(lid)]
+        if len(scene_ids) < 2:
+            scene_ids = []  # single-light rooms stay uniform
+    if scene_ids:
+        done = 0
+        for i, lid in enumerate(scene_ids):
+            try:
+                hs = palette_hs[i % len(palette_hs)]
+                sc = {"hue": hs[0], "sat": hs[1],
+                      "transitiontime": body["transitiontime"]}
+                if "bri" in body:
+                    sc["bri"] = body["bri"]
+                if "on" in body:
+                    sc["on"] = body["on"]
+                put_url(base + "/lights/%s/state" % lid, json.dumps(sc),
+                        hostname=hostname)
+                done += 1
+            except Exception as e:
+                safe_e = re.sub(r'/api/[^/]+/', '/api/***/', str(e))
+                log("scene light %s failed: %s" % (lid, safe_e))
+        sent += 1
+        scenes += 1
+        log("theme scene: room %s -> %d light(s), palette #%s" % (gid, done, color))
+        continue
     try:
         put_url(base + "/groups/%s/action" % gid, json.dumps(body),
                 hostname=hostname)

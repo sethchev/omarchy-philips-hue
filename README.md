@@ -55,14 +55,19 @@ Pass an IP directly to skip auto-discovery: `pair.sh 192.168.1.14`.
 > last color. Install the thpm plugin before enabling theme sync.
 
 A theme-set hook (`45-hue.sh`, vendored in `theme-sync/`) recolors every
-room/zone to the active theme's `accent` whenever you run `omarchy theme set`.
-The bar widget picks the change up within its 15 s poll.
+room/zone from the active theme whenever you run `omarchy theme set`: either
+the accent color, or — when scenes are enabled — a per-light scene built from
+the theme's palette. The bar widget picks the change up within its 15 s poll.
 
 ### Per-room opt-out
 
 Each room that is switched on gets a **Theme Sync** toggle in the panel,
 right below its own toggle. Every room starts out synced; toggling a room
 off excludes it from theme changes until you re-enable it.
+
+Rooms with at least two color-capable lights also get a **Scene Mode** toggle
+next to it. With Scene Mode on, the room's lights are colored from the theme's
+palette instead of one uniform accent (see [Theme scenes](#theme-scenes)).
 
 While a room is synced, its lights' color wheel and color temperature
 slider are hidden in the panel — the hook owns their color, so manual
@@ -106,6 +111,8 @@ Behavior is configured in `~/.config/omarchy/settings/hue-theme.json`:
   "bri": null,
   "turnOn": false,
   "themes": {},
+  "scene": false,
+  "sceneRooms": {},
   "themeSync": {}
 }
 ```
@@ -115,7 +122,34 @@ Behavior is configured in `~/.config/omarchy/settings/hue-theme.json`:
 - `bri` — optional forced brightness (1–254); leave `null` to keep each light's current brightness
 - `turnOn` — `true` to turn lights on when syncing; `false` leaves on/off state untouched
 - `themes` — per-theme hex overrides, e.g. `{ "spacehaven": "#0c8184" }`; themes without an override use their own `accent`
+- `scene` — `true` to enable theme scenes globally; off by default (`false`). Rooms missing from `sceneRooms` follow this value
+- `sceneRooms` — per-room scene override map written by the panel's Scene Mode toggles, e.g. `{ "office": true }`
 - `themeSync` — per-room opt-out map written by the panel's Theme Sync toggles, e.g. `{ "kitchen": false }`; rooms missing from the map are synced
+
+### Theme scenes
+
+When a synced room has two or more color-capable lights and Scene Mode is on
+for it, the hook stops painting the whole room one color and instead maps the
+theme's palette onto the room's lights, one hue per light. Only rooms with at
+least two color-capable lights are eligible — single-light and white-only
+rooms always fall back to the uniform accent, as do rooms with Scene Mode off.
+
+The scene palette is built from `colors.toml`:
+
+1. `accent` first (a `themes` override re-colors just this anchor)
+2. the named palette colors in file order (`red`, `yellow`, `green`, `cyan`,
+   `blue`, `magenta`, then `bright_*`)
+3. any other plain `#rrggbb` keys in file order
+
+Keys that describe surfaces rather than lights (backgrounds, foregrounds,
+`selection`, `muted`, borders, tabs) are skipped, and duplicate hexes are
+collapsed. Colors are assigned in room light order; light #1 always gets the
+accent. If a room has more lights than the palette, the palette cycles.
+
+`transition`, `bri`, and `turnOn` behave the same as in uniform mode, applied
+per light, so scenes fade in together. The bridge applies the writes
+immediately; the panel's rows and the room swatch pick the scene up within the
+normal 15 s poll.
 
 Test the hook without changing your theme:
 
