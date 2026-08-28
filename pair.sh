@@ -3,6 +3,7 @@ set -euo pipefail
 
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/settings"
 STATE_FILE="$STATE_DIR/hue.json"
+LOG_FILE="$(dirname "$STATE_DIR")/hue-pair.log"
 CACERT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/hue_bridge_cacert.pem"
 DEVICETYPE="${PHILIPS_HUE_DEVICETYPE:-philips#omarchy-hue}"
 DEVICETYPE="${DEVICETYPE//[^a-zA-Z0-9#_-]/}"
@@ -23,7 +24,23 @@ valid_ip() {
   done
 }
 
-discover_bridge() {
+discover_bridge_local() {
+  local out ip bridgeid
+  out=$(timeout 5 avahi-browse -t -r _hue._tcp 2>/dev/null || true)
+  [[ -z "$out" ]] && return 1
+  read -r ip bridgeid <<<"$(python3 -c "
+import re, sys
+text = sys.stdin.read()
+ips = re.findall(r'address = \[([^]]+)\]', text)
+ipv4 = [addr for addr in ips if ':' not in addr]
+ids = re.findall(r'bridgeid=([0-9a-fA-F]{16})', text)
+print((ipv4[0] if ipv4 else (ips[0] if ips else '')), (ids[0].lower() if ids else ''))
+" <<<"$out")"
+  [[ -n "$ip" ]] || return 1
+  printf '%s\t%s\n' "$ip" "$bridgeid"
+}
+
+discover_bridge_cloud() {
   local response ip
   response=$(curl -fsS --max-time 5 https://discovery.meethue.com/ 2>/dev/null || true)
   [[ -z "$response" ]] && return 1
@@ -61,25 +78,41 @@ PY
 
 pair() {
   local ip="$1" bridge_id="$2" response username
-  response=$(curl -fsS --max-time 8 --cacert "$CACERT" \
-    --resolve "${bridge_id}:443:${ip}" \
-    -X POST -H "Content-Type: application/json" \
-    -d "{\"devicetype\":\"$DEVICETYPE\"}" "https://${bridge_id}/api" 2>/dev/null || true)
-  username=$(python3 -c "
+  local now ts deadline=$(( $(date +%s) + 90 ))
+  while :; do
+    response=$(curl -fsS --max-time 5 --cacert "$CACERT" \
+      --resolve "${bridge_id}:443:${ip}" \
+      -X POST -H "Content-Type: application/json" \
+      -d "{\"devicetype\":\"$DEVICETYPE\"}" "https://${bridge_id}/api" 2>/dev/null || true)
+    ts=$(date +'%Y-%m-%d %H:%M:%S')
+    printf '%s POST /api devicetype=%s bridge=%s ip=%s -> %s\n' \
+      "$ts" "$DEVICETYPE" "$bridge_id" "$ip" "${response:-<empty>}" \
+      >>"$LOG_FILE" 2>/dev/null || true
+    username=$(python3 -c "
 import json, sys
 try:
     d = json.load(sys.stdin)
     for item in d:
         if isinstance(item, dict) and 'success' in item and 'username' in item['success']:
             u = item['success']['username']
-            if len(u) == 40 and all(c in '0123456789abcdef' for c in u):
+            if 20 <= len(u) <= 64 and all(c.isalnum() or c == '-' for c in u):
                 print(u)
             break
 except Exception:
     pass
 " <<<"$response")
+    [[ -n "$username" ]] && break
+    now=$(date +%s)
+    (( now >= deadline )) && break
+    sleep 2
+  done
   [[ -n "$username" ]] || return 1
   printf '%s\n' "$username"
+}
+
+mkdir -p "$STATE_DIR" || {
+  echo "Could not create state dir: $STATE_DIR" >&2
+  exit 1
 }
 
 if [[ -f "$STATE_FILE" ]] && python3 -c "import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d.get('bridgeIp') else 1)" "$STATE_FILE" 2>/dev/null; then
@@ -87,14 +120,21 @@ if [[ -f "$STATE_FILE" ]] && python3 -c "import json,sys; d=json.load(open(sys.a
   info "Re-pairing will replace the current username. The old username will stop working."
 fi
 
-read -r -p "Press the link button on the Hue bridge, then press Enter to continue... " </dev/tty
-
 local_ip=""
+discovered_bridge_id=""
 if [[ -n "$BRIDGE_IP" ]]; then
   local_ip="$BRIDGE_IP"
 else
   info "Discovering bridge..."
-  local_ip=$(discover_bridge) || true
+  discovery=""
+  discovery=$(discover_bridge_local) || true
+  if [[ -n "$discovery" ]]; then
+    local_ip="${discovery%%$'\t'*}"
+    discovered_bridge_id="${discovery##*$'\t'}"
+  fi
+  if [[ -z "$local_ip" ]]; then
+    local_ip=$(discover_bridge_cloud) || true
+  fi
   if [[ -z "$local_ip" ]]; then
     read -r -p "Couldn't discover the bridge automatically. Enter its IP address: " local_ip </dev/tty
   fi
@@ -112,40 +152,40 @@ fi
 
 info "Using bridge at $local_ip"
 
-info "Fetching bridge ID..."
-bridge_id=$(fetch_bridge_id "$local_ip")
-if [[ -z "$bridge_id" ]]; then
-  err "Could not fetch bridge ID. Aborting."
-  exit 1
+if [[ -n "$discovered_bridge_id" ]]; then
+  bridge_id="$discovered_bridge_id"
+else
+  info "Fetching bridge ID..."
+  bridge_id=$(fetch_bridge_id "$local_ip")
+  if [[ -z "$bridge_id" ]]; then
+    err "Could not fetch bridge ID. Aborting."
+    exit 1
+  fi
 fi
 ok "Bridge ID: ${bridge_id:0:8}***"
 
+info "Press the link button on the Hue bridge now, if you haven't. The pairing window stays open ~90 seconds."
 info "Requesting access from the bridge..."
 username=$(pair "$local_ip" "$bridge_id") || true
 if [[ -z "$username" ]]; then
-  err "Pairing failed. The link button was likely not pressed within 30 seconds. Try again."
+  err "Pairing failed after 90 seconds. Press the link button and try again."
   exit 1
 fi
 ok "Got username: ${username:0:4}***"
+info "Pairing log: $LOG_FILE"
 
-mkdir -p "$STATE_DIR"
 printf '%s\n%s\n%s\n' "$local_ip" "$bridge_id" "$username" | python3 -c "
 import json, os, sys
 bridge_ip, bridge_id, username = sys.stdin.read().splitlines()[:3]
-fd = os.open('''$STATE_FILE''', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-with os.fdopen(fd, 'w') as f:
-    json.dump({'bridgeIp': bridge_ip, 'bridgeId': bridge_id, 'username': username}, f, indent=2)
-    f.write('\n')
+data = json.dumps({'bridgeIp': bridge_ip, 'bridgeId': bridge_id, 'username': username}, indent=2) + '\n'
+fd = os.open('''$STATE_FILE''', os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+try:
+    os.write(fd, data.encode())
+finally:
+    os.close(fd)
 " 2>/dev/null || {
-  rm -f "$STATE_FILE" 2>/dev/null
-  printf '%s\n%s\n%s\n' "$local_ip" "$bridge_id" "$username" | python3 -c "
-import json, os, sys
-bridge_ip, bridge_id, username = sys.stdin.read().splitlines()[:3]
-fd = os.open('''$STATE_FILE''', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-with os.fdopen(fd, 'w') as f:
-    json.dump({'bridgeIp': bridge_ip, 'bridgeId': bridge_id, 'username': username}, f, indent=2)
-    f.write('\n')
-"
+  err "Could not write $STATE_FILE."
+  exit 1
 }
 ok "Saved config to $STATE_FILE"
 

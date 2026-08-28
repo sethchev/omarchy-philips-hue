@@ -135,8 +135,10 @@ plugin so no auth token is left behind.
   is read from `/api/config` and saved as `bridgeId` in `hue.json`; requests
   are then addressed to that ID so the bridge certificate's hostname is
   matched, while the connection itself goes straight to the bridge's IP.
-- Automatic discovery uses Philips' hosted lookup once; pass an IP directly
-  to `pair.sh` to skip it.
+- Automatic discovery tries **mDNS** first (`avahi-browse -t -r _hue._tcp`,
+  the same on-LAN mechanism the official Hue app uses), then falls back to
+  Philips' hosted lookup `discovery.meethue.com`. Pass an IP directly to
+  `pair.sh` to skip auto-discovery entirely.
 - If `bridgeId` is missing (e.g. from an older config), the panel warns
   "TLS verification disabled" — re-run `pair.sh` to restore full
   certificate verification.
