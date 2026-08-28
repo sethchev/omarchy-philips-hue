@@ -46,6 +46,12 @@ Pass an IP directly to skip auto-discovery: `pair.sh 192.168.1.14`.
 
 ## Syncing lights with the omarchy theme
 
+> **Requires thpm (Theme Hook Plugin Manager, `io.github.oldjobobo.thpm`).**
+> Theme sync drives off the `theme-set` hook chain, which thpm manages and which
+> sources its environment from `~/.local/share/thpm/lib/theme-env.sh`. Without
+> thpm installed, the `45-hue.sh` hook does not run and lights stay on their
+> last color. Install the thpm plugin before enabling theme sync.
+
 A theme-set hook (`45-hue.sh`, vendored in `theme-sync/`) recolors every
 room/zone to the active theme's `accent` whenever you run `omarchy theme set`.
 The bar widget picks the change up within its 15 s poll.

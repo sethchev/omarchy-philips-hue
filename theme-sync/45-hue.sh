@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-source "${THPM_THEME_ENV:-$HOME/.local/share/thpm/lib/theme-env.sh}"
+if [[ -f "${THPM_THEME_ENV:-$HOME/.local/share/thpm/lib/theme-env.sh}" ]]; then
+  source "${THPM_THEME_ENV:-$HOME/.local/share/thpm/lib/theme-env.sh}"
+fi
 set -u
 
 THEME_SLUG="${1:-}"
