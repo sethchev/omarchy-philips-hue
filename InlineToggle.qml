@@ -21,6 +21,11 @@ BorderSurface {
   property string description: ""
   property bool checked: false
 
+  // Optional row tint. When set (e.g. a light's current bulb color) the whole
+  // row is filled with a translucent version of that color. Leave transparent
+  // for the normal themed fill.
+  property color rowColor: "transparent"
+
   // Panel-cursor flag. Same role as Button.hasCursor:
   // panels with their own keyboard cursor bind this to drive the highlight
   // separately from activeFocus. Visuals use the same hover-cursor tokens.
@@ -51,7 +56,11 @@ BorderSurface {
   readonly property bool _hot: hasCursor || mouse.containsMouse || track.containsMouse
   readonly property var _borderSpec: Border.controlSpec(activeFocus ? "focus" : (_hot ? "hover-cursor" : "normal"), foreground, accent)
 
-  color: Style.controlFill(activeFocus, _hot, foreground, accent)
+  color: root.rowColor.a > 0
+    ? (root.rowColor.r + root.rowColor.g + root.rowColor.b === 0
+       ? "#000000"
+       : Qt.rgba(root.rowColor.r, root.rowColor.g, root.rowColor.b, _hot ? 0.45 : 0.28))
+    : Style.controlFill(activeFocus, _hot, foreground, accent)
   borderSpec: _borderSpec
 
   Behavior on color { ColorAnimation { duration: 100 } }

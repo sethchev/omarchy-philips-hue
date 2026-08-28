@@ -10,6 +10,8 @@ Omarchy / Quickshell bar widget for controlling Philips Hue lights over the brid
 
 - Bar icon (lightbulb) that opens a control panel
 - Toggle all rooms, individual rooms, or single lights
+- Every room and light row is tinted with the bulb's current color
+  (hue/sat, color temperature, or XY as reported by the bridge)
 - Per-light brightness slider
 - Per-light color temperature slider (warm ⇄ cool white)
 - Per-light color wheel picker (hue + saturation) and color temperature slider;

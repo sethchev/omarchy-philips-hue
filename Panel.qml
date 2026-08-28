@@ -147,6 +147,8 @@ Panel {
       hue: changes.hue !== undefined ? changes.hue : light.hue,
       sat: changes.sat !== undefined ? changes.sat : light.sat,
       hasColor: light.hasColor,
+      colormode: light.colormode,
+      xy: light.xy ? light.xy.slice() : [],
       pickerOpen: changes.pickerOpen !== undefined ? changes.pickerOpen : light.pickerOpen
     }
   }
@@ -642,7 +644,13 @@ Panel {
                   radius: Style.cornerRadius
                   implicitHeight: Math.max(54, Style.font.subtitle + Style.spacing.huge)
                   readonly property bool hot: headerMouse.containsMouse || powerTrack.hot
-                  color: Style.controlFill(false, roomHeader.hot, root.bar.foreground, Color.accent)
+                  readonly property color roomTint: HueApi.roomColor(roomColumn.modelData)
+                  color: roomHeader.roomTint.a > 0
+                    ? (roomHeader.roomTint.r + roomHeader.roomTint.g + roomHeader.roomTint.b === 0
+                       ? "#000000"
+                       : Qt.rgba(roomHeader.roomTint.r, roomHeader.roomTint.g, roomHeader.roomTint.b,
+                                 roomHeader.hot ? 0.45 : 0.30))
+                    : Style.controlFill(false, roomHeader.hot, root.bar.foreground, Color.accent)
                   borderSpec: Border.controlSpec(
                     roomHeader.hot ? "hover-cursor" : "normal",
                     root.bar.foreground, Color.accent)
@@ -753,6 +761,7 @@ Panel {
                       width: parent.width
                       label: modelData.name
                       titleSize: Style.font.body
+                      rowColor: HueApi.lightColor(modelData)
                       checked: modelData.on
                       foreground: Qt.darker(root.bar.foreground, 1.2)
                       accent: Color.accent
@@ -986,6 +995,7 @@ Panel {
                   width: parent.width
                   label: modelData.name
                   titleSize: Style.font.body
+                  rowColor: HueApi.lightColor(modelData)
                   checked: modelData.on
                   foreground: Qt.darker(root.bar.foreground, 1.2)
                   accent: Color.accent
