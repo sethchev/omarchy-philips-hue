@@ -610,7 +610,7 @@ Panel {
             wrapMode: Text.WordWrap
           }
 
-          Toggle {
+          InlineToggle {
             visible: root.config !== null && root.lightedRoomCount > 0
             width: parent.width
             label: "All lights"
@@ -641,7 +641,7 @@ Panel {
                   width: parent.width
                   radius: Style.cornerRadius
                   implicitHeight: Math.max(54, Style.font.subtitle + Style.spacing.huge)
-                  readonly property bool hot: headerMouse.containsMouse
+                  readonly property bool hot: headerMouse.containsMouse || powerTrack.hot
                   color: Style.controlFill(false, roomHeader.hot, root.bar.foreground, Color.accent)
                   borderSpec: Border.controlSpec(
                     roomHeader.hot ? "hover-cursor" : "normal",
@@ -657,8 +657,6 @@ Panel {
                     id: headerMouse
                     anchors.fill: parent
                     hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: root.toggleRoom(roomColumn.modelData.id, !roomColumn.modelData.on)
                   }
 
                   ToggleSwitch {
@@ -669,7 +667,8 @@ Panel {
                     checked: roomColumn.modelData.on
                     foreground: root.bar.foreground
                     accent: Color.accent
-                    interactive: false
+                    interactive: true
+                    onToggled: root.toggleRoom(roomColumn.modelData.id, !roomColumn.modelData.on)
                   }
 
                   Rectangle {
@@ -722,7 +721,7 @@ Panel {
                   }
                 }
 
-                Toggle {
+                InlineToggle {
                   visible: modelData.on && roomColumn.lightsOpen
                   width: parent.width
                   label: "Theme Sync"
@@ -750,7 +749,7 @@ Panel {
                     width: parent.width
                     spacing: Style.space(1)
 
-                    Toggle {
+                    InlineToggle {
                       width: parent.width
                       label: modelData.name
                       titleSize: Style.font.body
@@ -928,7 +927,7 @@ Panel {
                     width: parent.width
                     spacing: Style.space(2)
 
-                    Toggle {
+                    InlineToggle {
                       width: parent.width
                       label: modelData.name
                       checked: modelData.on
@@ -938,7 +937,7 @@ Panel {
                       onClicked: root.toggleRoom(modelData.id, !modelData.on)
                     }
 
-                    Toggle {
+                    InlineToggle {
                       visible: modelData.on
                       width: parent.width
                       label: "Theme Sync"
@@ -983,7 +982,7 @@ Panel {
                 width: parent.width
                 spacing: Style.space(2)
 
-                Toggle {
+                InlineToggle {
                   width: parent.width
                   label: modelData.name
                   titleSize: Style.font.body
