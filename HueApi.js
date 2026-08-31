@@ -43,31 +43,70 @@ function parseJsonObject(text) {
   }
 }
 
-function parseLights(text) {
-  var obj = parseJsonObject(text)
-  if (!obj) return []
+function xyToHueSat(x, y) {
+  if (typeof x !== "number" || typeof y !== "number" || y <= 0) return [0, 0]
+  var z = 1 - x - y
+  if (z <= 0) return [0, 0]
+  var X = x / y
+  var Z = z / y
+  // The picker is an sRGB HSV wheel. Hue gamuts can exceed sRGB, so its marker
+  // is the nearest displayable sRGB color rather than an exact inverse.
+  var gamma = function(value) {
+    value = clamp01(value)
+    return value <= 0.0031308 ? 12.92 * value : 1.055 * Math.pow(value, 1 / 2.4) - 0.055
+  }
+  var r = gamma(X * 3.2404542 - 1.5371385 - Z * 0.4985314)
+  var g = gamma(X * -0.9692660 + 1.8760108 + Z * 0.0415560)
+  var b = gamma(X * 0.0556434 - 0.2040259 + Z * 1.0572252)
+  var max = Math.max(r, g, b)
+  var min = Math.min(r, g, b)
+  var d = max - min
+  var hue = 0
+  if (d !== 0) {
+    if (max === r) hue = ((g - b) / d) % 6
+    else if (max === g) hue = (b - r) / d + 2
+    else hue = (r - g) / d + 4
+    hue = (hue / 6 + 1) % 1
+  }
+  return [Math.round(hue * 65535), Math.round((max === 0 ? 0 : d / max) * 254)]
+}
+
+function parseLightsV2(text) {
+  var arr = parseJsonObject(text)
+  if (!arr || !Array.isArray(arr)) return []
   var lights = []
-  for (var id in obj) {
-    if (!Object.prototype.hasOwnProperty.call(obj, id)) continue
-    var light = obj[id]
-    var state = light.state || {}
-    var hasBri = typeof state.bri === "number"
-    var hasCt = typeof state.ct === "number"
-    var hasColor = typeof state.hue === "number" && typeof state.sat === "number"
-    var hasXy = Array.isArray(state.xy) && state.xy.length >= 2
+  for (var i = 0; i < arr.length; i++) {
+    var r = arr[i]
+    if (!r || typeof r !== "object") continue
+    var type = String(r.type || "")
+    if (type !== "light") continue
+    var onState = r.on || {}
+    var dimming = r.dimming || {}
+    var ct = r.color_temperature || {}
+    var color = r.color || {}
+    var xy = color.xy || {}
+    var brightness = typeof dimming.brightness === "number" ? dimming.brightness : 0
+    var mirek = ct.mirek
+    var mirekValid = !!ct.mirek_valid
+    var x = typeof xy.x === "number" ? xy.x : null
+    var y = typeof xy.y === "number" ? xy.y : null
+    var hasCt = mirekValid && typeof mirek === "number"
+    var hasXy = x !== null && y !== null
+    var bri = brightness > 0 ? Math.max(1, Math.min(254, Math.round((brightness / 100) * 254))) : 0
+    var hueSat = hasXy ? xyToHueSat(x, y) : [0, 0]
     lights.push({
-      id: String(id),
-      name: String(light.name || "Light " + id),
-      on: !!state.on,
-      bri: hasBri ? Math.max(1, Math.min(254, state.bri)) : 0,
-      hasBri: hasBri,
-      ct: hasCt ? Math.max(153, Math.min(500, state.ct)) : 0,
+      id: String(r.id || ""),
+      name: String((r.metadata || {}).name || "Light"),
+      on: !!onState.on,
+      bri: bri,
+      hasBri: true,
+      ct: hasCt ? Math.max(153, Math.min(500, Math.round(mirek))) : 0,
       hasCt: hasCt,
-      hue: hasColor ? state.hue : 0,
-      sat: hasColor ? state.sat : 0,
-      hasColor: hasColor,
-      colormode: String(state.colormode || ""),
-      xy: hasXy ? [Number(state.xy[0]), Number(state.xy[1])] : [],
+      hue: hueSat[0],
+      sat: hueSat[1],
+      hasColor: hasXy,
+      colormode: hasCt && !hasXy ? "ct" : "hs",
+      xy: hasXy ? [Number(x), Number(y)] : [],
       pickerOpen: false
     })
   }
@@ -75,22 +114,86 @@ function parseLights(text) {
   return lights
 }
 
-function parseGroups(text) {
-  var obj = parseJsonObject(text)
-  if (!obj) return []
+function parseGroupsV2(roomsText, zonesText, devicesText, groupedLightsText) {
+  var roomsArr = parseJsonObject(roomsText)
+  var zonesArr = parseJsonObject(zonesText)
+  var devicesArr = parseJsonObject(devicesText)
+  var glArr = parseJsonObject(groupedLightsText)
+  if (!roomsArr || !Array.isArray(roomsArr) || !zonesArr || !Array.isArray(zonesArr)) return []
+
+  var deviceToLight = {}
+  if (devicesArr && Array.isArray(devicesArr)) {
+    for (var d = 0; d < devicesArr.length; d++) {
+      var dev = devicesArr[d]
+      if (!dev || typeof dev !== "object") continue
+      var devId = String(dev.id || "")
+      var services = dev.services || []
+      if (!Array.isArray(services)) continue
+      for (var s = 0; s < services.length; s++) {
+        var svc = services[s]
+        if (svc && svc.rtype === "light" && typeof svc.rid === "string") {
+          deviceToLight[devId] = svc.rid
+          break
+        }
+      }
+    }
+  }
+
+  var glState = {}
+  if (glArr && Array.isArray(glArr)) {
+    for (var g = 0; g < glArr.length; g++) {
+      var gl = glArr[g]
+      if (!gl || typeof gl !== "object") continue
+      var glId = String(gl.id || "")
+      var onState = gl.on || {}
+      var dim = gl.dimming || {}
+      glState[glId] = {
+        on: !!onState.on,
+        brightness: typeof dim.brightness === "number" ? dim.brightness : 0
+      }
+    }
+  }
+
   var groups = []
-  for (var id in obj) {
-    if (!Object.prototype.hasOwnProperty.call(obj, id)) continue
-    var group = obj[id]
-    var type = String(group.type || "")
-    if (type !== "Room" && type !== "Zone") continue
+  var resources = roomsArr.concat(zonesArr)
+  for (var r = 0; r < resources.length; r++) {
+    var resource = resources[r]
+    if (!resource || typeof resource !== "object") continue
+    var resourceType = String(resource.type || "")
+    if (resourceType !== "room" && resourceType !== "zone") continue
+    var resourceId = String(resource.id || "")
+    var meta = resource.metadata || {}
+    var children = resource.children || []
+    var services = resource.services || []
+    var glUuid = ""
+    for (var si = 0; si < services.length; si++) {
+      var svc = services[si]
+      if (svc && svc.rtype === "grouped_light" && typeof svc.rid === "string") {
+        glUuid = svc.rid
+        break
+      }
+    }
+    var lightIds = []
+    if (Array.isArray(children)) {
+      for (var c = 0; c < children.length; c++) {
+        var child = children[c]
+        if (child && child.rtype === "device" && typeof child.rid === "string") {
+          var lightUuid = deviceToLight[child.rid]
+          if (lightUuid && lightIds.indexOf(lightUuid) === -1) lightIds.push(lightUuid)
+        } else if (child && child.rtype === "light" && typeof child.rid === "string") {
+          if (lightIds.indexOf(child.rid) === -1) lightIds.push(child.rid)
+        }
+      }
+    }
+    var state = glState[glUuid] || { on: false, brightness: 0 }
     groups.push({
-      id: String(id),
-      name: String(group.name || "Group " + id),
-      type: type,
-      on: !!(group.state && group.state.any_on),
-      allOn: !!(group.state && group.state.all_on),
-      lightIds: Array.isArray(group.lights) ? group.lights.map(String) : []
+      id: resourceId,
+      name: String(meta.name || (resourceType === "zone" ? "Zone" : "Room")),
+      type: resourceType === "zone" ? "Zone" : "Room",
+      on: state.on,
+      allOn: false,
+      lightIds: lightIds,
+      groupedLightId: glUuid
     })
   }
   groups.sort(function(a, b) { return a.name.localeCompare(b.name) })

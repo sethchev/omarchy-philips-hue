@@ -21,10 +21,21 @@ Panel {
   property var roomsWithLights: []
   property var orphanLights: []
   property int pendingFetches: 0
+  property bool fetchStarting: false
+  property bool refreshQueued: false
   property bool loading: false
   property bool lastFetchFailed: false
+  property int fetchErrorCode: 0
+  property string actionErrorText: ""
   property var actionQueue: []
   property var expandedRooms: ({})
+  property var rawDevicesText: ""
+  property var rawGroupedLightsText: ""
+  property var rawLightsText: ""
+  property var rawRoomsText: ""
+  property var rawZonesText: ""
+  property int pollGeneration: 0
+  property int fetchSuccessCount: 0
 
   readonly property int roomCount: root.roomsWithLights.length
   readonly property int lightTotal: root.lightsTotal()
@@ -32,10 +43,21 @@ Panel {
   readonly property int emptyRoomCount: root.emptyRooms().length
   readonly property bool allLightsOn: root.computeAllLightsOn()
   readonly property bool insecureMode: root.config !== null && !root.config.bridgeId
+  readonly property string stateHome: Quickshell.env("XDG_STATE_HOME") || Quickshell.env("HOME") + "/.local/state"
+  readonly property string fetchErrorText: {
+    if (!root.lastFetchFailed) return ""
+    if (root.fetchErrorCode === 2) return "Bridge authorization failed. Re-run pair.sh."
+    if (root.fetchErrorCode === 3) return "Bridge TLS verification failed. Re-run pair.sh."
+    if (root.fetchErrorCode === 4) return "Bridge DNS resolution failed. Check the bridge configuration."
+    if (root.fetchErrorCode === 5) return "Bridge request timed out. Check the bridge is on and reachable."
+    if (root.fetchErrorCode === 6) return "Bridge API request failed. Try again later."
+    return "Couldn't reach the bridge. Check the bridge is on and the IP is still valid, then re-run pair.sh."
+  }
 
   readonly property string statusText: {
     if (root.config === null) return "Not paired"
-    if (root.lastFetchFailed) return "Bridge unreachable"
+    if (root.actionErrorText) return root.actionErrorText
+    if (root.lastFetchFailed) return root.fetchErrorText
     if (root.loading) return "Loading…"
     var roomLabel = root.lightedRoomCount + " room" + (root.lightedRoomCount === 1 ? "" : "s")
     return roomLabel + " · " + root.lightTotal + " light" + (root.lightTotal === 1 ? "" : "s")
@@ -93,28 +115,64 @@ Panel {
       configFile.reload()
       return
     }
+    if (root.pendingFetches > 0 || root.fetchStarting) {
+      root.refreshQueued = true
+      return
+    }
     root.lastFetchFailed = false
+    root.fetchErrorCode = 0
     if (root.roomsWithLights.length === 0 && root.orphanLights.length === 0) root.loading = true
-    lightsProc.running = false
-    groupsProc.running = false
+    root.fetchStarting = true
     Qt.callLater(startFetches)
   }
 
   function startFetches() {
-    if (!root.config) return
-    root.pendingFetches = 2
-    lightsProc.command = HueApi.apiCmd(["get-lights"])
-    groupsProc.command = HueApi.apiCmd(["get-groups"])
+    if (!root.config || root.pendingFetches > 0) {
+      root.fetchStarting = false
+      return
+    }
+    root.fetchStarting = false
+    var gen = ++root.pollGeneration
+    root.pendingFetches = 5
+    root.fetchSuccessCount = 0
+    lightsProc.generation = gen
+    roomsProc.generation = gen
+    zonesProc.generation = gen
+    devicesProc.generation = gen
+    groupedLightsProc.generation = gen
+    lightsProc.command = HueApi.apiCmd(["get-lights-v2"])
+    roomsProc.command = HueApi.apiCmd(["get-rooms-v2"])
+    zonesProc.command = HueApi.apiCmd(["get-zones-v2"])
+    devicesProc.command = HueApi.apiCmd(["get-devices-v2"])
+    groupedLightsProc.command = HueApi.apiCmd(["get-grouped-lights-v2"])
     lightsProc.running = true
-    groupsProc.running = true
+    roomsProc.running = true
+    zonesProc.running = true
+    devicesProc.running = true
+    groupedLightsProc.running = true
   }
 
-  function finishFetch(success) {
+  function finishFetch(generation, success, exitCode) {
+    if (generation !== root.pollGeneration) return
     root.pendingFetches--
-    if (success === false) root.lastFetchFailed = true
+    if (success) root.fetchSuccessCount++
+    else if (root.fetchErrorCode === 0 || exitCode === 2) root.fetchErrorCode = exitCode || 1
     if (root.pendingFetches <= 0) {
       root.loading = false
-      root.assembleRooms()
+      root.lastFetchFailed = root.fetchSuccessCount !== 5
+      if (!root.lastFetchFailed) {
+        var lights = HueApi.parseLightsV2(root.rawLightsText)
+        var byId = {}
+        for (var i = 0; i < lights.length; i++) byId[lights[i].id] = lights[i]
+        root.lightsById = byId
+        root.rooms = HueApi.parseGroupsV2(root.rawRoomsText, root.rawZonesText,
+          root.rawDevicesText, root.rawGroupedLightsText)
+        root.assembleRooms()
+      }
+      if (root.refreshQueued) {
+        root.refreshQueued = false
+        Qt.callLater(root.refresh)
+      }
     }
   }
 
@@ -123,9 +181,22 @@ Panel {
     var result = []
     for (var i = 0; i < root.rooms.length; i++) {
       var room = root.rooms[i]
-      var lights = HueApi.roomLights(room, root.lightsById)
-      for (var j = 0; j < room.lightIds.length; j++) used[room.lightIds[j]] = true
-      result.push({ id: room.id, name: room.name, on: room.on, lightCount: lights.length, lights: lights })
+      var lights = []
+      for (var j = 0; j < room.lightIds.length; j++) {
+        var light = root.lightsById[room.lightIds[j]]
+        if (light) {
+          lights.push(light)
+          used[light.id] = true
+        }
+      }
+      result.push({
+        id: room.id,
+        name: room.name,
+        on: room.on,
+        lightCount: lights.length,
+        lights: lights,
+        groupedLightId: room.groupedLightId || ""
+      })
     }
     var orphans = []
     for (var id in root.lightsById) {
@@ -158,17 +229,37 @@ Panel {
   }
 
   function setRoomOn(roomId, on) {
-    var newRooms = []
+    var affected = {}
     for (var i = 0; i < root.roomsWithLights.length; i++) {
-      var room = root.roomsWithLights[i]
+      if (root.roomsWithLights[i].id !== roomId) continue
+      for (var j = 0; j < root.roomsWithLights[i].lights.length; j++) {
+        affected[root.roomsWithLights[i].lights[j].id] = true
+      }
+      break
+    }
+    var newRooms = []
+    for (var k = 0; k < root.roomsWithLights.length; k++) {
+      var room = root.roomsWithLights[k]
+      var updatedLights = room.lights.map(function(light) {
+        return affected[light.id] ? root.lightCopy(light, on) : light
+      })
+      var roomOn = room.id === roomId ? on : room.on
+      if (updatedLights.length > 0) {
+        roomOn = false
+        for (var l = 0; l < updatedLights.length; l++) {
+          if (updatedLights[l].on) {
+            roomOn = true
+            break
+          }
+        }
+      }
       newRooms.push({
         id: room.id,
         name: room.name,
-        on: room.id === roomId ? on : room.on,
+        on: roomOn,
         lightCount: room.lightCount,
-        lights: room.id === roomId
-          ? room.lights.map(function(light) { return root.lightCopy(light, on) })
-          : room.lights
+        lights: updatedLights,
+        groupedLightId: room.groupedLightId || ""
       })
     }
     root.roomsWithLights = newRooms
@@ -185,7 +276,8 @@ Panel {
         lightCount: room.lightCount,
         lights: room.lights.map(function(light) {
           return light.id === lightId ? root.lightCopy(light, on) : light
-        })
+        }),
+        groupedLightId: room.groupedLightId || ""
       })
     }
     root.roomsWithLights = newRooms
@@ -205,7 +297,8 @@ Panel {
         lightCount: room.lightCount,
         lights: room.lights.map(function(light) {
           return light.id === lightId ? root.lightClone(light, changes) : light
-        })
+        }),
+        groupedLightId: room.groupedLightId || ""
       })
     }
     root.roomsWithLights = newRooms
@@ -273,14 +366,24 @@ Panel {
   function toggleRoom(roomId, on) {
     if (!root.config) return
     root.setRoomOn(roomId, on)
-    root.runAction(HueApi.apiCmd(["put-group", roomId, JSON.stringify({ on: on })]))
+    var room = root.findRoom(roomId)
+    if (room && room.groupedLightId) {
+      root.runAction(HueApi.apiCmd(["put-grouped-light-v2", room.groupedLightId, JSON.stringify({ on: on })]))
+    }
     root.scheduleRefresh()
+  }
+
+  function findRoom(roomId) {
+    for (var i = 0; i < root.roomsWithLights.length; i++) {
+      if (root.roomsWithLights[i].id === roomId) return root.roomsWithLights[i]
+    }
+    return null
   }
 
   function toggleLight(lightId, on) {
     if (!root.config) return
     root.setLightOn(lightId, on)
-    root.runAction(HueApi.apiCmd(["put-light", lightId, JSON.stringify({ on: on })]))
+    root.runAction(HueApi.apiCmd(["put-light-v2", lightId, JSON.stringify({ on: on })]))
     root.scheduleRefresh()
   }
 
@@ -288,7 +391,7 @@ Panel {
     if (!root.config) return
     var clamped = Math.max(1, Math.min(254, Math.round(bri)))
     root.setLightBri(lightId, clamped)
-    root.runAction(HueApi.apiCmd(["put-light", lightId, JSON.stringify({ bri: clamped })]))
+    root.runAction(HueApi.apiCmd(["put-light-v2", lightId, JSON.stringify({ bri: clamped })]))
     root.scheduleRefresh()
   }
 
@@ -296,14 +399,14 @@ Panel {
     if (!root.config) return
     var clamped = Math.max(153, Math.min(500, Math.round(ct)))
     root.setLightCt(lightId, clamped)
-    root.runAction(HueApi.apiCmd(["put-light", lightId, JSON.stringify({ ct: clamped })]))
+    root.runAction(HueApi.apiCmd(["put-light-v2", lightId, JSON.stringify({ ct: clamped })]))
     root.scheduleRefresh()
   }
 
   function setLightColor(lightId, hue, sat) {
     if (!root.config) return
     root.patchLightColor(lightId, hue, sat)
-    root.runAction(HueApi.apiCmd(["put-light", lightId, JSON.stringify({ hue: hue, sat: sat })]))
+    root.runAction(HueApi.apiCmd(["put-light-v2", lightId, JSON.stringify({ hue: hue, sat: sat })]))
     root.scheduleRefresh()
   }
 
@@ -312,7 +415,9 @@ Panel {
     var rooms = root.lightedRooms()
     var body = JSON.stringify({ on: on })
     for (var i = 0; i < rooms.length; i++) {
-      root.runAction(HueApi.apiCmd(["put-group", rooms[i].id, body]))
+      if (rooms[i].groupedLightId) {
+        root.runAction(HueApi.apiCmd(["put-grouped-light-v2", rooms[i].groupedLightId, body]))
+      }
     }
     root.setAllOn(on)
     root.scheduleRefresh()
@@ -326,12 +431,14 @@ Panel {
         name: room.name,
         on: on,
         lightCount: room.lightCount,
-        lights: room.lights.map(function(light) { return root.lightCopy(light, on) })
+        lights: room.lights.map(function(light) { return root.lightCopy(light, on) }),
+        groupedLightId: room.groupedLightId || ""
       }
     })
   }
 
   function runAction(command) {
+    root.actionErrorText = ""
     root.actionQueue.push(command)
     drainActionQueue()
   }
@@ -349,7 +456,7 @@ Panel {
   }
 
   property FileView configFile: FileView {
-    path: Quickshell.env("HOME") + "/.local/state/omarchy/settings/hue.json"
+    path: root.stateHome + "/omarchy/settings/hue.json"
     watchChanges: true
     printErrors: false
     onFileChanged: reload()
@@ -364,7 +471,7 @@ Panel {
   }
 
   property FileView themeNameFile: FileView {
-    path: Quickshell.env("HOME") + "/.local/state/omarchy/current/theme.name"
+    path: root.stateHome + "/omarchy/current/theme.name"
     watchChanges: true
     printErrors: false
     onFileChanged: reload()
@@ -427,38 +534,88 @@ Panel {
 
   Process {
     id: lightsProc
+    property int generation: 0
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        var lights = HueApi.parseLights(text)
-        var byId = {}
-        for (var i = 0; i < lights.length; i++) byId[lights[i].id] = lights[i]
-        root.lightsById = byId
-        root.finishFetch(true)
+        if (lightsProc.generation !== root.pollGeneration) return
+        root.rawLightsText = text
       }
     }
     onExited: function(exitCode) {
-      if (exitCode !== 0) root.finishFetch(false)
+      if (lightsProc.generation !== root.pollGeneration) return
+      root.finishFetch(lightsProc.generation, exitCode === 0, exitCode)
     }
   }
 
   Process {
-    id: groupsProc
+    id: roomsProc
+    property int generation: 0
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        root.rooms = HueApi.parseGroups(text)
-        root.finishFetch(true)
+        if (roomsProc.generation !== root.pollGeneration) return
+        root.rawRoomsText = text
       }
     }
     onExited: function(exitCode) {
-      if (exitCode !== 0) root.finishFetch(false)
+      if (roomsProc.generation !== root.pollGeneration) return
+      root.finishFetch(roomsProc.generation, exitCode === 0, exitCode)
+    }
+  }
+
+  Process {
+    id: zonesProc
+    property int generation: 0
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        if (zonesProc.generation !== root.pollGeneration) return
+        root.rawZonesText = text
+      }
+    }
+    onExited: function(exitCode) {
+      if (zonesProc.generation !== root.pollGeneration) return
+      root.finishFetch(zonesProc.generation, exitCode === 0, exitCode)
+    }
+  }
+
+  Process {
+    id: devicesProc
+    property int generation: 0
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        if (devicesProc.generation !== root.pollGeneration) return
+        root.rawDevicesText = text
+      }
+    }
+    onExited: function(exitCode) {
+      if (devicesProc.generation !== root.pollGeneration) return
+      root.finishFetch(devicesProc.generation, exitCode === 0, exitCode)
+    }
+  }
+
+  Process {
+    id: groupedLightsProc
+    property int generation: 0
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        if (groupedLightsProc.generation !== root.pollGeneration) return
+        root.rawGroupedLightsText = text
+      }
+    }
+    onExited: function(exitCode) {
+      if (groupedLightsProc.generation !== root.pollGeneration) return
+      root.finishFetch(groupedLightsProc.generation, exitCode === 0, exitCode)
     }
   }
 
   Process {
     id: actionProc
     onExited: function(exitCode) {
+      if (exitCode !== 0) root.actionErrorText = "Update failed. Refresh and try again."
       root.drainActionQueue()
     }
   }
@@ -469,7 +626,7 @@ Panel {
     owner: root.barIdentity
     bar: root.bar
     open: root.opened
-    centerOnBar: true
+    centerOnBar: false
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(380))
     contentHeight: panel.fittedContentHeight(column.implicitHeight)
@@ -617,7 +774,7 @@ Panel {
           Text {
             visible: root.config !== null && root.lastFetchFailed && !root.loading
             width: parent.width
-            text: "Couldn't reach the bridge. Check the bridge is on and the IP is still valid, then re-run pair.sh."
+            text: root.fetchErrorText
             color: Color.urgent
             font.family: root.bar.fontFamily
             font.pixelSize: Style.font.caption
@@ -769,8 +926,7 @@ Panel {
                       var ts = JSON.parse(JSON.stringify(root.themeSync))
                       ts[modelData.id] = ts[modelData.id] === false
                       root.themeSync = ts
-                      actionProc.command = HueApi.apiCmd(["write-theme-config", JSON.stringify(ts)])
-                      actionProc.running = true
+                      root.runAction(HueApi.apiCmd(["write-theme-config", JSON.stringify(ts)]))
                     }
                   }
 
@@ -786,8 +942,7 @@ Panel {
                       var ss = JSON.parse(JSON.stringify(root.sceneRooms))
                       ss[modelData.id] = !root.roomSceneDefault(modelData.id)
                       root.sceneRooms = ss
-                      actionProc.command = HueApi.apiCmd(["write-scene-config", JSON.stringify(ss)])
-                      actionProc.running = true
+                      root.runAction(HueApi.apiCmd(["write-scene-config", JSON.stringify(ss)]))
                     }
                   }
                 }
@@ -1004,8 +1159,7 @@ Panel {
                         var ts = JSON.parse(JSON.stringify(root.themeSync))
                         ts[modelData.id] = ts[modelData.id] === false
                         root.themeSync = ts
-                        actionProc.command = HueApi.apiCmd(["write-theme-config", JSON.stringify(ts)])
-                        actionProc.running = true
+                        root.runAction(HueApi.apiCmd(["write-theme-config", JSON.stringify(ts)]))
                       }
                     }
                   }

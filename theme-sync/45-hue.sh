@@ -5,10 +5,13 @@ fi
 set -u
 
 THEME_SLUG="${1:-}"
+STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
 CONFIG_FILE="$HOME/.config/omarchy/settings/hue-theme.json"
-CREDS_FILE="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/settings/hue.json"
-LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy"
+CREDS_FILE="$STATE_HOME/omarchy/settings/hue.json"
+LOG_DIR="$STATE_HOME/omarchy"
 LOG_FILE="$LOG_DIR/hue-theme-hook.log"
+PLUGIN_DIR="$HOME/.config/omarchy/plugins/omarchy-philips-hue"
+HUE_API_PATH="$PLUGIN_DIR/hue-api.py"
 
 if ! command -v python3 >/dev/null 2>&1; then
   printf '[%s] %s\n' "$(date '+%F %T')" "python3 not found; skipping hue theme sync" >> "$LOG_FILE" 2>/dev/null
@@ -51,7 +54,12 @@ if [[ ! -f "$CREDS_FILE" ]]; then
   exit 0
 fi
 
-COLORS_FILE="$HOME/.local/state/omarchy/current/theme/colors.toml"
+if [[ ! -r "$HUE_API_PATH" ]]; then
+  log "hue-api.py unavailable; skipping hue theme sync"
+  exit 0
+fi
+
+COLORS_FILE="$STATE_HOME/omarchy/current/theme/colors.toml"
 accent_color=""
 if [[ -f "$COLORS_FILE" ]]; then
   accent_color="$(grep -E '^accent\s*=' "$COLORS_FILE" | sed 's/^accent\s*=\s*["'\'']\?\([#]*[0-9a-fA-F]\{6\}\)["'\'']\?/\1/' | tr -d '#')"
@@ -64,28 +72,29 @@ fi
 CONFIG_FILE="$CONFIG_FILE" \
   THEME_SLUG="$THEME_SLUG" \
   ACCENT_COLOR="$accent_color" \
+  HUE_API_PATH="$HUE_API_PATH" \
+  STATE_HOME="$STATE_HOME" \
   python3 - "$LOG_FILE" <<'PY'
 import json
+import importlib.util
+import math
 import os
 import re
 import socket
 import ssl
 import sys
 import time
-import urllib.request
+from urllib.error import HTTPError, URLError
 
 log_file = sys.argv[1]
 theme_slug = os.environ.get("THEME_SLUG", "")
 accent = os.environ.get("ACCENT_COLOR", "").lstrip("#")
 config_file = os.environ.get("CONFIG_FILE", "")
-creds_file = os.path.expanduser("~/.local/state/omarchy/settings/hue.json")
+state_home = os.environ.get("STATE_HOME", os.path.expanduser("~/.local/state"))
+creds_file = os.path.join(state_home, "omarchy/settings/hue.json")
+hue_api_path = os.environ.get("HUE_API_PATH", "")
 
-cacert_file = ""
-_plugin_dir = os.path.join(os.path.expanduser("~"),
-                           ".config/omarchy/plugins/omarchy-philips-hue")
-_candidate = os.path.join(_plugin_dir, "hue_bridge_cacert.pem")
-if os.path.isfile(_candidate):
-    cacert_file = os.path.abspath(_candidate)
+_UUID_RE = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
 
 
 def log(msg):
@@ -105,89 +114,73 @@ def read_json(path):
         return None
 
 
-class _BridgeResolver:
-    """Context manager that makes hostname resolve to a specific IP."""
-    def __init__(self, hostname, ip):
-        self._hostname = hostname
-        self._ip = ip
-        self._orig = None
-
-    def __enter__(self):
-        self._orig = socket.getaddrinfo
-        def _patched(host, port, *args, **kwargs):
-            if host == self._hostname:
-                return [(socket.AF_INET, socket.SOCK_STREAM, 6, '',
-                         (self._ip, port))]
-            return self._orig(host, port, *args, **kwargs)
-        socket.getaddrinfo = _patched
-        return self
-
-    def __exit__(self, *args):
-        socket.getaddrinfo = self._orig
+try:
+    spec = importlib.util.spec_from_file_location("hue_api", hue_api_path)
+    hue_api = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(hue_api)
+    creds = hue_api._load_creds()
+except Exception as e:
+    log("unable to load Hue v2 transport; skipping hue theme sync")
+    sys.exit(0)
 
 
-_opener = None
+def bridge_error(error):
+    if isinstance(error, HTTPError):
+        return "Hue API HTTP %d" % error.code
+    reason = error.reason if isinstance(error, URLError) else error
+    if isinstance(reason, ssl.SSLError):
+        return "Hue bridge TLS error"
+    if isinstance(reason, socket.gaierror):
+        return "Hue bridge DNS error"
+    if isinstance(reason, (socket.timeout, TimeoutError)):
+        return "Hue bridge timeout"
+    return "Hue bridge transport error"
 
 
-def _get_opener(hostname, cafile):
-    global _opener
-    if _opener is None:
-        ctx = ssl.create_default_context(cafile=cafile)
-        ctx.check_hostname = True
-        _opener = urllib.request.build_opener(
-            urllib.request.HTTPSHandler(context=ctx))
-    return _opener
-
-
-def get_json(url, hostname=None):
+def get_resource(resource_type):
     try:
-        if hostname and cacert_file:
-            opener = _get_opener(hostname, cacert_file)
-            with _BridgeResolver(hostname, bridge_ip):
-                with opener.open(url, timeout=5) as r:
-                    return json.load(r)
-        else:
-            with urllib.request.urlopen(url, timeout=5) as r:
-                return json.load(r)
+        return hue_api.v2_get_data(creds, resource_type)
     except Exception as e:
-        safe_url = re.sub(r'/api/[^/]+/', '/api/***/', url)
-        safe_e = re.sub(r'/api/[^/]+/', '/api/***/', str(e))
-        log("bridge request failed %s: %s" % (safe_url, safe_e))
+        log("%s while reading %s" % (bridge_error(e), resource_type))
         return None
 
 
-def put_url(url, data, hostname=None):
-    req = urllib.request.Request(
-        url, data=data.encode(), headers={"Content-Type": "application/json"},
-        method="PUT")
-    if hostname and cacert_file:
-        opener = _get_opener(hostname, cacert_file)
-        with _BridgeResolver(hostname, bridge_ip):
-            with opener.open(req, timeout=5) as r:
-                r.read()
-    else:
-        with urllib.request.urlopen(req, timeout=5) as r:
-            r.read()
+def put_resource(resource_type, resource_id, body):
+    try:
+        hue_api.v2_put_resource(creds, resource_type, resource_id, body)
+        return True
+    except Exception as e:
+        log("%s while writing %s/%s" % (
+            bridge_error(e), resource_type, resource_id))
+        return False
 
 
-def hex_to_hsv(hexval):
+# ---------------------------------------------------------------------------
+# Color conversion: hex -> CIE 1931 XY (same math as hue-api.py)
+# ---------------------------------------------------------------------------
+
+def hex_to_xy(hexval):
+    """Convert 6-digit hex color to CIE 1931 (x, y) coordinates."""
     r = int(hexval[0:2], 16) / 255.0
     g = int(hexval[2:4], 16) / 255.0
     b = int(hexval[4:6], 16) / 255.0
-    mx = max(r, g, b)
-    mn = min(r, g, b)
-    d = mx - mn
+    X = 0.4124564 * r + 0.3575761 * g + 0.1804375 * b
+    Y = 0.2126729 * r + 0.7151522 * g + 0.0721750 * b
+    Z = 0.0193339 * r + 0.1191920 * g + 0.9503041 * b
+    d = X + Y + Z
     if d == 0:
-        hue01 = 0.0
-    elif mx == r:
-        hue01 = ((g - b) / d) % 6
-    elif mx == g:
-        hue01 = (b - r) / d + 2
-    else:
-        hue01 = (r - g) / d + 4
-    hue01 = (hue01 / 6.0) % 1.0
-    sat = 0.0 if mx == 0 else d / mx
-    return int(round(hue01 * 65535)) % 65536, int(round(sat * 254))
+        return 0.0, 0.0
+    return round(X / d, 4), round(Y / d, 4)
+
+
+def brightness_to_v2(bri):
+    """Convert the panel brightness scale (1-254) to v2 (0.0-100.0)."""
+    return round((max(1, min(254, int(bri))) / 254.0) * 100.0, 2)
+
+
+def transition_to_ms(transitiontime):
+    """Convert the config transition (tenths of a second) to milliseconds."""
+    return max(0, int(transitiontime)) * 100
 
 
 def build_scene_palette(path):
@@ -226,6 +219,10 @@ def build_scene_palette(path):
     return palette
 
 
+# ---------------------------------------------------------------------------
+# Credential loading and permission repair
+# ---------------------------------------------------------------------------
+
 try:
     fd = os.open(creds_file, os.O_RDONLY | os.O_NOFOLLOW)
     try:
@@ -239,13 +236,6 @@ try:
 except (OSError, ValueError):
     pass
 
-creds = read_json(creds_file)
-if not creds or not creds.get("bridgeIp") or not creds.get("username"):
-    sys.exit(0)
-
-bridge_id = str(creds.get("bridgeId") or "").strip().lower()
-bridge_ip = creds["bridgeIp"]
-
 cfg = read_json(config_file) or {}
 if not cfg.get("enabled", True):
     sys.exit(0)
@@ -256,109 +246,278 @@ if not color or len(color) != 6:
     log("invalid color '%s'; skipping hue theme sync" % color)
     sys.exit(0)
 
-hue, sat = hex_to_hsv(color)
-transition = int(cfg.get("transition", 20) or 20)
+xy_x, xy_y = hex_to_xy(color)
+transition_ms = transition_to_ms(int(cfg.get("transition", 20) or 20))
 
-if bridge_id and cacert_file:
-    base = "https://%s/api/%s" % (bridge_id, creds["username"])
-    hostname = bridge_id
-else:
-    base = "https://%s/api/%s" % (bridge_ip, creds["username"])
-    hostname = None
-
-groups = get_json(base + "/groups", hostname=hostname)
-if groups is None:
-    log("bridge unreachable; skipping hue theme sync")
+# ---------------------------------------------------------------------------
+# Discover rooms/zones and their grouped_light UUIDs (v2)
+# ---------------------------------------------------------------------------
+rooms = get_resource("room")
+zones = get_resource("zone")
+if rooms is None or zones is None:
+    log("room or zone discovery failed; skipping hue theme sync")
     sys.exit(0)
 
 
-def room_or_zone(g):
-    return g.get("type") in ("Room", "Zone")
+def group_info(resource):
+    if not isinstance(resource, dict):
+        return None
+    kind = resource.get("type")
+    rid = resource.get("id", "")
+    if kind not in ("room", "zone") or not _UUID_RE.match(str(rid)):
+        return None
+    metadata = resource.get("metadata") or {}
+    name = metadata.get("name", "") if isinstance(metadata, dict) else ""
+    services = resource.get("services")
+    children = resource.get("children")
+    if not isinstance(services, list) or not isinstance(children, list):
+        return None
+    grouped_light_id = None
+    for service in services:
+        if (isinstance(service, dict) and service.get("rtype") == "grouped_light"
+                and _UUID_RE.match(str(service.get("rid", "")))):
+            grouped_light_id = service["rid"]
+            break
+    device_ids = []
+    light_ids = []
+    children_valid = True
+    for child in children:
+        if not isinstance(child, dict):
+            children_valid = False
+            continue
+        if child.get("rtype") == "device":
+            device_id = child.get("rid", "")
+            if _UUID_RE.match(str(device_id)):
+                device_ids.append(device_id)
+            else:
+                children_valid = False
+        elif child.get("rtype") == "light":
+            light_id = child.get("rid", "")
+            if _UUID_RE.match(str(light_id)):
+                light_ids.append(light_id)
+            else:
+                children_valid = False
+    return {
+        "id": rid,
+        "legacy_id": str(resource.get("id_v1", "")).rsplit("/", 1)[-1],
+        "name": str(name),
+        "kind": kind,
+        "grouped_light_id": grouped_light_id,
+        "device_ids": device_ids,
+        "light_ids": light_ids,
+        "children_valid": children_valid,
+    }
 
 
-configured = cfg.get("groups")
-if configured and "all" not in configured:
-    names = [str(n).strip().lower() for n in configured if str(n) and str(n).strip() and str(n).lower() != "all"]
-    if names:
-        targets = [gid for gid, g in groups.items()
-                   if room_or_zone(g)
-                   and any(n in str(g.get("name", "")).lower() for n in names)]
-    else:
-        targets = [gid for gid, g in groups.items() if room_or_zone(g)]
-else:
-    targets = [gid for gid, g in groups.items() if room_or_zone(g)]
+groups = [info for resource in rooms + zones for info in [group_info(resource)]
+          if info is not None]
 
-# Per-room theme sync toggle: filter targets based on themeSync dict
+
 theme_sync = cfg.get("themeSync") or {}
-targets = [gid for gid in targets if theme_sync.get(gid, True)]
-
-# Theme scenes (opt-in): map the theme's palette onto each room's lights
-# instead of painting the whole group one uniform color.
-scene = bool(cfg.get("scene", False))
 scene_rooms = cfg.get("sceneRooms") or {}
-any_scene = scene or any(
-    isinstance(v, bool) and v for v in scene_rooms.values())
-palette_hs = []
+if not isinstance(theme_sync, dict) or not isinstance(scene_rooms, dict):
+    log("invalid per-group theme config; skipping hue theme sync")
+    sys.exit(0)
+if any(type(value) is not bool for value in theme_sync.values()) or any(
+        type(value) is not bool for value in scene_rooms.values()):
+    log("invalid per-group theme config value; skipping hue theme sync")
+    sys.exit(0)
+
+
+def migrate_legacy_keys(settings):
+    """Translate persisted v1 numeric group keys to v2 resource UUIDs only."""
+    migrated = {}
+    native = {}
+    for key, value in settings.items():
+        key = str(key)
+        if key.isdigit():
+            matches = [group for group in groups if group["legacy_id"] == key]
+            if len(matches) != 1:
+                return None
+            key = matches[0]["id"]
+            migrated[key] = value
+        else:
+            native[key] = value
+    # Explicit v2 resource settings win regardless of JSON key order.
+    migrated.update(native)
+    return migrated
+
+
+theme_sync = migrate_legacy_keys(theme_sync)
+scene_rooms = migrate_legacy_keys(scene_rooms)
+if theme_sync is None or scene_rooms is None:
+    log("legacy numeric theme config cannot be resolved; skipping hue theme sync")
+    sys.exit(0)
+
+# ---------------------------------------------------------------------------
+# Build target list from exact config names or native UUIDs
+# ---------------------------------------------------------------------------
+configured = cfg.get("groups")
+if configured is not None and not isinstance(configured, list):
+    log("invalid group list; skipping hue theme sync")
+    sys.exit(0)
+if configured and not any(str(value).strip().lower() == "all" for value in configured):
+    targets, seen = [], set()
+    for value in configured:
+        selector = str(value).strip()
+        if not selector:
+            continue
+        if _UUID_RE.match(selector):
+            matches = [group for group in groups if group["id"] == selector]
+        else:
+            matches = [group for group in groups
+                       if group["name"].lower() == selector.lower()]
+        if len(matches) != 1:
+            log("group selector '%s' is missing or ambiguous; skipping" % selector)
+            continue
+        target = matches[0]
+        if target["id"] not in seen:
+            targets.append(target)
+            seen.add(target["id"])
+else:
+    targets = groups
+
+# themeSync and sceneRooms are keyed by v2 room/zone resource UUIDs.
+targets = [target for target in targets if theme_sync.get(target["id"], True)]
+scene = bool(cfg.get("scene", False))
+
+
+def uses_scene(target):
+    return scene_rooms.get(target["id"], scene)
+
+
+any_scene = any(uses_scene(target) for target in targets)
+palette_xy = []
 if any_scene:
-    palette = build_scene_palette(os.path.expanduser(
-        "~/.local/state/omarchy/current/theme/colors.toml"))
-    if palette:
+    palette = build_scene_palette(os.path.join(
+        state_home, "omarchy/current/theme/colors.toml"))
+    if not palette:
+        log("scene palette unavailable; skipping requested multi-color sync")
+    else:
         palette[0] = color  # per-theme override re-colors the accent anchor
-        palette_hs = [hex_to_hsv(h) for h in palette]
+        palette_xy = [hex_to_xy(h) for h in palette]
 
-body = {"hue": hue, "sat": sat, "transitiontime": transition}
+# Device/light discovery is required only for requested multi-color targets.
+devices_by_id = {}
+lights_by_id = {}
+scene_discovery_failed = False
+if any_scene:
+    v2_devices = get_resource("device")
+    v2_lights = get_resource("light")
+    if v2_devices is None or v2_lights is None:
+        scene_discovery_failed = True
+        log("scene device or light discovery failed; skipping requested multi-color sync")
+    else:
+        for device in v2_devices:
+            if isinstance(device, dict) and _UUID_RE.match(str(device.get("id", ""))):
+                devices_by_id[device["id"]] = device
+        for light in v2_lights:
+            if isinstance(light, dict) and _UUID_RE.match(str(light.get("id", ""))):
+                lights_by_id[light["id"]] = light
+
+# ---------------------------------------------------------------------------
+# Build v2 bodies
+# ---------------------------------------------------------------------------
+# Uniform body for grouped_light
+uniform_body = {"color": {"xy": {"x": xy_x, "y": xy_y}}}
 if cfg.get("bri") is not None:
-    body["bri"] = int(max(1, min(254, cfg["bri"])))
+    bri_v2 = brightness_to_v2(cfg["bri"])
+    uniform_body["dimming"] = {"brightness": bri_v2}
 if cfg.get("turnOn"):
-    body["on"] = True
+    uniform_body["on"] = {"on": True}
+if transition_ms > 0:
+    uniform_body["dynamics"] = {"duration": transition_ms}
 
-lights = get_json(base + "/lights", hostname=hostname) or {}
-
-
-def has_color(lid):
-    st = lights.get(lid, {}).get("state") or {}
-    return (isinstance(st.get("hue"), (int, float))
-            and isinstance(st.get("sat"), (int, float)))
-
-
+# ---------------------------------------------------------------------------
+# Send commands
+# ---------------------------------------------------------------------------
 sent = 0
 scenes = 0
-for gid in targets:
-    scene_ids = []
-    if scene_rooms.get(gid, scene) and palette_hs:
-        group = get_json(base + "/groups/%s" % gid, hostname=hostname)
-        if group and isinstance(group.get("lights"), list):
-            scene_ids = [lid for lid in group["lights"] if has_color(lid)]
-        if len(scene_ids) < 2:
-            scene_ids = []  # single-light rooms stay uniform
-    if scene_ids:
-        done = 0
-        for i, lid in enumerate(scene_ids):
-            try:
-                hs = palette_hs[i % len(palette_hs)]
-                sc = {"hue": hs[0], "sat": hs[1],
-                      "transitiontime": body["transitiontime"]}
-                if "bri" in body:
-                    sc["bri"] = body["bri"]
-                if "on" in body:
-                    sc["on"] = body["on"]
-                put_url(base + "/lights/%s/state" % lid, json.dumps(sc),
-                        hostname=hostname)
-                done += 1
-            except Exception as e:
-                safe_e = re.sub(r'/api/[^/]+/', '/api/***/', str(e))
-                log("scene light %s failed: %s" % (lid, safe_e))
-        sent += 1
-        scenes += 1
-        log("theme scene: room %s -> %d light(s), palette #%s" % (gid, done, color))
+for target in targets:
+    gl_uuid = target["grouped_light_id"]
+    group_name = target["name"] or target["id"]
+
+    if not gl_uuid:
+        log("%s %s has no grouped_light; skipping" % (target["kind"], group_name))
         continue
-    try:
-        put_url(base + "/groups/%s/action" % gid, json.dumps(body),
-                hostname=hostname)
+
+    if uses_scene(target):
+        if scene_discovery_failed or not palette_xy or not target["children_valid"]:
+            log("scene discovery incomplete for %s; skipping" % group_name)
+            continue
+
+        # Scene mode: resolve direct child lights and child device light services.
+        color_lids = []
+        mapping_valid = True
+        for lid in target["light_ids"]:
+            light = lights_by_id.get(lid)
+            if not isinstance(light, dict):
+                mapping_valid = False
+                break
+            xy = (light.get("color") or {}).get("xy") or {}
+            if isinstance(xy.get("x"), (int, float)) and isinstance(xy.get("y"), (int, float)):
+                color_lids.append(lid)
+        if not mapping_valid:
+            log("scene device-to-light mapping incomplete for %s; skipping" % group_name)
+            continue
+        for did in target["device_ids"]:
+            device = devices_by_id.get(did)
+            services = device.get("services") if isinstance(device, dict) else None
+            if not isinstance(services, list):
+                mapping_valid = False
+                break
+            owns_light = False
+            for service in services:
+                if not isinstance(service, dict):
+                    mapping_valid = False
+                    break
+                if service.get("rtype") != "light":
+                    continue
+                owns_light = True
+                lid = service.get("rid", "")
+                light = lights_by_id.get(lid)
+                if not _UUID_RE.match(str(lid)) or not isinstance(light, dict):
+                    mapping_valid = False
+                    break
+                xy = (light.get("color") or {}).get("xy") or {}
+                if (isinstance(xy.get("x"), (int, float))
+                        and isinstance(xy.get("y"), (int, float))
+                        and lid not in color_lids):
+                    color_lids.append(lid)
+            if not mapping_valid or not owns_light:
+                mapping_valid = False
+                break
+        if not mapping_valid:
+            log("scene device-to-light mapping incomplete for %s; skipping" % group_name)
+            continue
+        if len(color_lids) < 2:
+            log("scene requires at least two color lights for %s; skipping" % group_name)
+            continue
+
+        done = 0
+        for i, lid in enumerate(color_lids):
+            px, py = palette_xy[i % len(palette_xy)]
+            light_body = {"color": {"xy": {"x": px, "y": py}}}
+            if "dimming" in uniform_body:
+                light_body["dimming"] = uniform_body["dimming"]
+            if "on" in uniform_body:
+                light_body["on"] = uniform_body["on"]
+            if "dynamics" in uniform_body:
+                light_body["dynamics"] = uniform_body["dynamics"]
+            if put_resource("light", lid, light_body):
+                done += 1
+        if done == len(color_lids):
+            sent += 1
+            scenes += 1
+            log("theme scene: %s -> %d light(s), palette #%s" % (group_name, done, color))
+        else:
+            log("theme scene incomplete: %s -> %d/%d light(s)" % (
+                group_name, done, len(color_lids)))
+        continue
+
+    # Uniform mode: set the verified room or zone grouped_light.
+    if put_resource("grouped_light", gl_uuid, uniform_body):
         sent += 1
-    except Exception as e:
-        safe_e = re.sub(r'/api/[^/]+/', '/api/***/', str(e))
-        log("group %s failed: %s" % (gid, safe_e))
 
 log("theme sync: %d/%d group(s) -> #%s" % (sent, len(targets), color))
 PY

@@ -1,6 +1,6 @@
 # omarchy-philips-hue
 
-Omarchy / Quickshell bar widget for controlling Philips Hue lights over the bridge's local HTTP API (v1).
+Omarchy / Quickshell bar widget for controlling Philips Hue lights over the bridge's local Hue API v2.
 
 <p align="center">
   <img src="preview.png" alt="omarchy-philips-hue panel screenshot" width="360">
@@ -9,13 +9,13 @@ Omarchy / Quickshell bar widget for controlling Philips Hue lights over the brid
 ## Features
 
 - Bar icon (lightbulb) that opens a control panel
-- Toggle all rooms, individual rooms, or single lights
-- Every room and light row is tinted with the bulb's current color
+- Toggle all groups, individual Rooms/Zones, or single lights
+- Every group and light row is tinted with the bulb's current color
   (hue/sat, color temperature, or XY as reported by the bridge)
 - Per-light brightness slider
 - Per-light color temperature slider (warm ⇄ cool white)
 - Per-light color wheel picker (hue + saturation) and color temperature slider;
-  both hidden for lights in rooms with theme sync enabled
+  both hidden for lights in groups with theme sync enabled
 - Reads credentials from `~/.local/state/omarchy/settings/hue.json`
 - Retries / re-fetches state automatically after every change
 
@@ -59,23 +59,23 @@ room/zone from the active theme whenever you run `omarchy theme set`: either
 the accent color, or — when scenes are enabled — a per-light scene built from
 the theme's palette. The bar widget picks the change up within its 15 s poll.
 
-### Per-room opt-out
+### Per-group opt-out
 
-Each room that is switched on gets a **Theme Sync** toggle in the panel,
-right below its own toggle. Every room starts out synced; toggling a room
+Each room or zone that is switched on gets a **Theme Sync** toggle in the panel,
+right below its own toggle. Every group starts out synced; toggling a group
 off excludes it from theme changes until you re-enable it.
 
-Rooms with at least two color-capable lights also get a **Scene Mode** toggle
-next to it. With Scene Mode on, the room's lights are colored from the theme's
+Groups with at least two color-capable lights also get a **Scene Mode** toggle
+next to it. With Scene Mode on, the group's lights are colored from the theme's
 palette instead of one uniform accent (see [Theme scenes](#theme-scenes)).
 
-While a room is synced, its lights' color wheel and color temperature
+While a Room or Zone is synced, its lights' color wheel and color temperature
 slider are hidden in the panel — the hook owns their color, so manual
-picking would be overwritten anyway. Rooms with sync off keep full manual
+picking would be overwritten anyway. Groups with sync off keep full manual
 control.
 
 The toggle states live under the `themeSync` key of `hue-theme.json`
-(missing room = enabled), and are picked up by the hook immediately — no
+(missing group = enabled), and are picked up by the hook immediately — no
 restart needed.
 
 ### Install
@@ -118,21 +118,26 @@ Behavior is configured in `~/.config/omarchy/settings/hue-theme.json`:
 ```
 
 - `transition` — fade length in tenths of a second (20 = 2 s)
-- `groups` — `["all"]`, or a subset of room/zone names to sync
+- `groups` — `["all"]`, or exact room/zone names or resource UUIDs to sync; duplicate names must use UUIDs
 - `bri` — optional forced brightness (1–254); leave `null` to keep each light's current brightness
 - `turnOn` — `true` to turn lights on when syncing; `false` leaves on/off state untouched
 - `themes` — per-theme hex overrides, e.g. `{ "spacehaven": "#0c8184" }`; themes without an override use their own `accent`
-- `scene` — `true` to enable theme scenes globally; off by default (`false`). Rooms missing from `sceneRooms` follow this value
-- `sceneRooms` — per-room scene override map written by the panel's Scene Mode toggles, e.g. `{ "office": true }`
-- `themeSync` — per-room opt-out map written by the panel's Theme Sync toggles, e.g. `{ "kitchen": false }`; rooms missing from the map are synced
+- `scene` — `true` to enable theme scenes globally; off by default (`false`). Groups missing from `sceneRooms` follow this value
+- `sceneRooms` — per-group scene override map keyed by room/zone resource UUID, written by the panel's Scene Mode toggles
+- `themeSync` — per-group opt-out map keyed by room/zone resource UUID, written by the panel's Theme Sync toggles; groups missing from the map are synced
+
+Existing numeric v1 keys in `themeSync` and `sceneRooms` are translated only
+when their v2 resource exposes a unique matching `id_v1`; otherwise sync is
+skipped rather than targeting the wrong group.
 
 ### Theme scenes
 
-When a synced room has two or more color-capable lights and Scene Mode is on
-for it, the hook stops painting the whole room one color and instead maps the
-theme's palette onto the room's lights, one hue per light. Only rooms with at
-least two color-capable lights are eligible — single-light and white-only
-rooms always fall back to the uniform accent, as do rooms with Scene Mode off.
+When a synced Room or Zone has two or more color-capable lights and Scene Mode
+is on for it, the hook stops painting the whole group one color and instead maps
+the theme's palette onto the group's lights, one hue per light. Scene Mode
+requires at least two color-capable lights; otherwise the hook skips that group
+rather than issuing a uniform grouped-light write. Groups with Scene Mode off
+use the uniform accent.
 
 The scene palette is built from `colors.toml`:
 
@@ -143,12 +148,12 @@ The scene palette is built from `colors.toml`:
 
 Keys that describe surfaces rather than lights (backgrounds, foregrounds,
 `selection`, `muted`, borders, tabs) are skipped, and duplicate hexes are
-collapsed. Colors are assigned in room light order; light #1 always gets the
-accent. If a room has more lights than the palette, the palette cycles.
+collapsed. Colors are assigned in group light order; light #1 always gets the
+accent. If a group has more lights than the palette, the palette cycles.
 
 `transition`, `bri`, and `turnOn` behave the same as in uniform mode, applied
 per light, so scenes fade in together. The bridge applies the writes
-immediately; the panel's rows and the room swatch pick the scene up within the
+immediately; the panel's rows and the group swatch pick the scene up within the
 normal 15 s poll.
 
 Test the hook without changing your theme:
@@ -170,8 +175,8 @@ plugin so no auth token is left behind.
 
 ## Notes
 
-- Speaks to the bridge over **HTTPS** on your LAN with the v1 API
-  (`/api/<username>/lights`, `/groups`, etc.) — no cloud, no SDK.
+- Runtime control uses the Hue API v2 over **HTTPS** on your LAN
+  (`/clip/v2/resource`) — no cloud, no SDK.
 - TLS is verified with the bundled `hue_bridge_cacert.pem`, the official
   Philips Hue root CA from Signify. During pairing, the bridge's unique ID
   is read from `/api/config` and saved as `bridgeId` in `hue.json`; requests
@@ -184,9 +189,8 @@ plugin so no auth token is left behind.
 - If `bridgeId` is missing (e.g. from an older config), the panel warns
   "TLS verification disabled" — re-run `pair.sh` to restore full
   certificate verification.
-- Uses the classic v1 local API, which every current bridge still serves —
-  including the 2025 Bridge Pro (HTTPS-only, `apiversion` 1.73.x). New Hue
-  features ship exclusively in the v2 API and Signify has said v1 will be
-  removed long-term, but no end-of-life date has been announced.
+- Pairing uses Hue's legacy local enrollment endpoints only to read the bridge
+  ID and create the application key. Normal panel and theme-sync control use
+  v2 exclusively.
 - Credentials are stored per-user in `~/.local/state/omarchy/settings/hue.json`;
   keep that file out of version control.

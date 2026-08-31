@@ -3,7 +3,6 @@ set -euo pipefail
 
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/settings"
 STATE_FILE="$STATE_DIR/hue.json"
-LOG_FILE="$(dirname "$STATE_DIR")/hue-pair.log"
 CACERT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/hue_bridge_cacert.pem"
 DEVICETYPE="${PHILIPS_HUE_DEVICETYPE:-philips#omarchy-hue}"
 DEVICETYPE="${DEVICETYPE//[^a-zA-Z0-9#_-]/}"
@@ -78,16 +77,12 @@ PY
 
 pair() {
   local ip="$1" bridge_id="$2" response username
-  local now ts deadline=$(( $(date +%s) + 90 ))
+  local now deadline=$(( $(date +%s) + 90 ))
   while :; do
     response=$(curl -fsS --max-time 5 --cacert "$CACERT" \
       --resolve "${bridge_id}:443:${ip}" \
       -X POST -H "Content-Type: application/json" \
       -d "{\"devicetype\":\"$DEVICETYPE\"}" "https://${bridge_id}/api" 2>/dev/null || true)
-    ts=$(date +'%Y-%m-%d %H:%M:%S')
-    printf '%s POST /api devicetype=%s bridge=%s ip=%s -> %s\n' \
-      "$ts" "$DEVICETYPE" "$bridge_id" "$ip" "${response:-<empty>}" \
-      >>"$LOG_FILE" 2>/dev/null || true
     username=$(python3 -c "
 import json, sys
 try:
@@ -171,18 +166,31 @@ if [[ -z "$username" ]]; then
   err "Pairing failed after 90 seconds. Press the link button and try again."
   exit 1
 fi
-ok "Got username: ${username:0:4}***"
-info "Pairing log: $LOG_FILE"
-
 printf '%s\n%s\n%s\n' "$local_ip" "$bridge_id" "$username" | python3 -c "
-import json, os, sys
+import json, os, stat, sys
 bridge_ip, bridge_id, username = sys.stdin.read().splitlines()[:3]
 data = json.dumps({'bridgeIp': bridge_ip, 'bridgeId': bridge_id, 'username': username}, indent=2) + '\n'
-fd = os.open('''$STATE_FILE''', os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+path = '''$STATE_FILE'''
 try:
-    os.write(fd, data.encode())
-finally:
-    os.close(fd)
+    if stat.S_ISLNK(os.lstat(path).st_mode):
+        raise OSError('refusing credential symlink')
+except FileNotFoundError:
+    pass
+tmp = path + '.tmp.' + str(os.getpid())
+try:
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        os.write(fd, data.encode())
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(tmp, path)
+except:
+    try:
+        os.unlink(tmp)
+    except FileNotFoundError:
+        pass
+    raise
 " 2>/dev/null || {
   err "Could not write $STATE_FILE."
   exit 1
@@ -195,7 +203,7 @@ if [[ ! -f "$CACERT" ]]; then
 fi
 
 info "Verifying access..."
-light_count=$(python3 "$(dirname -- "${BASH_SOURCE[0]}")/hue-api.py" verify 2>/dev/null || true)
+light_count=$(python3 "$(dirname -- "${BASH_SOURCE[0]}")/hue-api.py" verify-v2 2>/dev/null || true)
 if [[ -n "$light_count" ]]; then
   ok "Connected. Found $light_count light(s)."
 else
