@@ -3,7 +3,8 @@ set -euo pipefail
 
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/settings"
 STATE_FILE="$STATE_DIR/hue.json"
-CACERT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/hue_bridge_cacert.pem"
+HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+CACERT="$HERE/hue_bridge_cacert.pem"
 DEVICETYPE="${PHILIPS_HUE_DEVICETYPE:-philips#omarchy-hue}"
 DEVICETYPE="${DEVICETYPE//[^a-zA-Z0-9#_-]/}"
 
@@ -196,6 +197,11 @@ except:
   exit 1
 }
 ok "Saved config to $STATE_FILE"
+
+if ! bash "$HERE/theme-sync/install.sh"; then
+  err "Paired, but Theme Sync hook installation failed."
+  exit 1
+fi
 
 if [[ ! -f "$CACERT" ]]; then
   err "CA cert not found at $CACERT. Cannot verify bridge connection."

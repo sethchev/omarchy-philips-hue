@@ -48,12 +48,6 @@ Pass an IP directly to skip auto-discovery: `pair.sh 192.168.1.14`.
 
 ## Syncing lights with the omarchy theme
 
-> **Requires thpm (Theme Hook Plugin Manager, `io.github.oldjobobo.thpm`).**
-> Theme sync drives off the `theme-set` hook chain, which thpm manages and which
-> sources its environment from `~/.local/share/thpm/lib/theme-env.sh`. Without
-> thpm installed, the `45-hue.sh` hook does not run and lights stay on their
-> last color. Install the thpm plugin before enabling theme sync.
-
 A theme-set hook (`45-hue.sh`, vendored in `theme-sync/`) recolors every
 room/zone from the active theme whenever you run `omarchy theme set`: either
 the accent color, or — when scenes are enabled — a per-light scene built from
@@ -78,28 +72,15 @@ The toggle states live under the `themeSync` key of `hue-theme.json`
 (missing group = enabled), and are picked up by the hook immediately — no
 restart needed.
 
-### Install
-
-The repo ships everything needed under `theme-sync/`:
-
-```sh
-~/.config/omarchy/plugins/omarchy-philips-hue/theme-sync/install.sh
-```
-
-This copies `45-hue.sh` to `~/.config/omarchy/hooks/theme-set.d/` (make it
-executable) and writes a default `hue-theme.json` to
-`~/.config/omarchy/settings/` if you don't have one yet. No shell restart is
-needed — the hook is picked up on the next `omarchy theme set`.
-
-To install manually instead:
+Pairing registers the hook with Omarchy automatically. Existing installations
+can register it once without overwriting their Hue settings:
 
 ```sh
-mkdir -p ~/.config/omarchy/hooks/theme-set.d ~/.config/omarchy/settings
-cp theme-sync/45-hue.sh ~/.config/omarchy/hooks/theme-set.d/45-hue.sh
-chmod +x ~/.config/omarchy/hooks/theme-set.d/45-hue.sh
-cp -n theme-sync/hue-theme.json ~/.config/omarchy/settings/hue-theme.json
-chmod 600 ~/.config/omarchy/settings/hue-theme.json
+bash ~/.config/omarchy/plugins/omarchy-philips-hue/theme-sync/install.sh
 ```
+
+It uses `omarchy hook install theme-set` and leaves an existing non-plugin
+hook or symlink at the same path untouched.
 
 Behavior is configured in `~/.config/omarchy/settings/hue-theme.json`:
 
