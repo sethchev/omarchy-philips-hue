@@ -65,6 +65,10 @@ Each room that is switched on gets a **Theme Sync** toggle in the panel,
 right below its own toggle. Every room starts out synced; toggling a room
 off excludes it from theme changes until you re-enable it.
 
+Turning a room's **Theme Sync** back on immediately force-syncs that room to
+the current theme's color right away (no need to switch themes again). This
+is handy for catching a room up after it was excluded during a theme change.
+
 Rooms with at least two color-capable lights also get a **Scene Mode** toggle
 next to it. With Scene Mode on, the room's lights are colored from the theme's
 palette instead of one uniform accent (see [Theme scenes](#theme-scenes)).

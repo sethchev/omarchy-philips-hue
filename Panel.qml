@@ -767,10 +767,14 @@ Panel {
                     fontFamily: root.bar.fontFamily
                     onClicked: {
                       var ts = JSON.parse(JSON.stringify(root.themeSync))
-                      ts[modelData.id] = ts[modelData.id] === false
+                      var turningOn = ts[modelData.id] === false
+                      ts[modelData.id] = turningOn
                       root.themeSync = ts
                       actionProc.command = HueApi.apiCmd(["write-theme-config", JSON.stringify(ts)])
                       actionProc.running = true
+                      if (turningOn) {
+                        root.runAction(HueApi.apiCmd(["sync-room", modelData.id]))
+                      }
                     }
                   }
 
@@ -1002,10 +1006,14 @@ Panel {
                       fontFamily: root.bar.fontFamily
                       onClicked: {
                         var ts = JSON.parse(JSON.stringify(root.themeSync))
-                        ts[modelData.id] = ts[modelData.id] === false
+                        var turningOn = ts[modelData.id] === false
+                        ts[modelData.id] = turningOn
                         root.themeSync = ts
                         actionProc.command = HueApi.apiCmd(["write-theme-config", JSON.stringify(ts)])
                         actionProc.running = true
+                        if (turningOn) {
+                          root.runAction(HueApi.apiCmd(["sync-room", modelData.id]))
+                        }
                       }
                     }
                   }
