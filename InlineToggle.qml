@@ -90,6 +90,7 @@ BorderSurface {
 
       Text {
         text: root.label
+        textFormat: Text.PlainText
         color: root.foreground
         font.family: root.fontFamily
         font.pixelSize: root.titleSize
@@ -101,6 +102,7 @@ BorderSurface {
       Text {
         visible: root.description !== ""
         text: root.description
+        textFormat: Text.PlainText
         color: Qt.darker(root.foreground, 1.5)
         font.family: root.fontFamily
         font.pixelSize: root.descriptionSize

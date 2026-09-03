@@ -743,6 +743,7 @@ Panel {
                     anchors.rightMargin: Style.spacing.rowPaddingX
                     anchors.verticalCenter: parent.verticalCenter
                     text: roomColumn.modelData.name + " (" + roomColumn.modelData.lightCount + ")"
+                    textFormat: Text.PlainText
                     color: root.bar.foreground
                     font.family: root.bar.fontFamily
                     font.pixelSize: Style.font.subtitle
