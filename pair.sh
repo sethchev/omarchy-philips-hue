@@ -14,6 +14,31 @@ info() { printf '\033[1;34m::\033[0m %s\n' "$*"; }
 ok()   { printf '\033[1;32m::\033[0m %s\n' "$*"; }
 err()  { printf '\033[1;31m::\033[0m %s\n' "$*" >&2; }
 
+ensure_log_perms() {
+  python3 -c "
+import os
+try:
+    fd = os.open('''$LOG_FILE''', os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+    except (OSError, ValueError):
+        pass
+    os.close(fd)
+except FileExistsError:
+    try:
+        fd = os.open('''$LOG_FILE''', os.O_WRONLY | os.O_NOFOLLOW)
+        os.fchmod(fd, 0o600)
+        os.close(fd)
+    except (OSError, ValueError):
+        try:
+            os.remove('''$LOG_FILE''')
+        except OSError:
+            pass
+        fd = os.open('''$LOG_FILE''', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.close(fd)
+" 2>/dev/null || true
+}
+
 valid_ip() {
   local IFS='.'
   local parts=($1)
@@ -85,8 +110,21 @@ pair() {
       -X POST -H "Content-Type: application/json" \
       -d "{\"devicetype\":\"$DEVICETYPE\"}" "https://${bridge_id}/api" 2>/dev/null || true)
     ts=$(date +'%Y-%m-%d %H:%M:%S')
+    local redacted
+    redacted=$(printf '%s' "${response:-<empty>}" | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    for item in (d if isinstance(d, list) else [d]):
+        if isinstance(item, dict) and 'success' in item:
+            if 'username' in item['success']:
+                item['success']['username'] = item['success']['username'][:4] + '****'
+    json.dump(d, sys.stdout)
+except Exception:
+    print('<parse-error>')
+")
     printf '%s POST /api devicetype=%s bridge=%s ip=%s -> %s\n' \
-      "$ts" "$DEVICETYPE" "$bridge_id" "$ip" "${response:-<empty>}" \
+      "$ts" "$DEVICETYPE" "$bridge_id" "$ip" "$redacted" \
       >>"$LOG_FILE" 2>/dev/null || true
     username=$(python3 -c "
 import json, sys
@@ -114,6 +152,8 @@ mkdir -p "$STATE_DIR" || {
   echo "Could not create state dir: $STATE_DIR" >&2
   exit 1
 }
+
+ensure_log_perms
 
 if [[ -f "$STATE_FILE" ]] && python3 -c "import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d.get('bridgeIp') else 1)" "$STATE_FILE" 2>/dev/null; then
   info "Existing config found at $STATE_FILE."
