@@ -11,7 +11,7 @@ function isValidIp(ip) {
 }
 
 function isValidId(id) {
-  return /^[a-zA-Z0-9_-]{1,40}$/.test(String(id))
+  return /^[a-zA-Z0-9_-]{1,64}$/.test(String(id))
 }
 
 function parseConfig(text) {
@@ -26,7 +26,9 @@ function parseConfig(text) {
     if (!bridgeIp || !isValidIp(bridgeIp)) return null
     if (!username || !isValidId(username)) return null
     if (bridgeId && !isValidId(bridgeId)) bridgeId = ""
-    return { bridgeIp: bridgeIp, username: username, bridgeId: bridgeId }
+    var apiVersion = String(parsed.apiVersion || "v1").toLowerCase()
+    if (apiVersion !== "v1" && apiVersion !== "v2") apiVersion = "v1"
+    return { bridgeIp: bridgeIp, username: username, bridgeId: bridgeId, apiVersion: apiVersion }
   } catch (e) {
     return null
   }
@@ -51,23 +53,29 @@ function parseLights(text) {
     if (!Object.prototype.hasOwnProperty.call(obj, id)) continue
     var light = obj[id]
     var state = light.state || {}
-    var hasBri = typeof state.bri === "number"
-    var hasCt = typeof state.ct === "number"
-    var hasColor = typeof state.hue === "number" && typeof state.sat === "number"
+    var hasBri = light.has_bri !== undefined ? !!light.has_bri : typeof state.bri === "number"
+    var hasCt = light.has_ct !== undefined ? !!light.has_ct : typeof state.ct === "number"
+    var hasColor = light.has_color !== undefined
+      ? !!light.has_color
+      : typeof state.hue === "number" && typeof state.sat === "number"
     var hasXy = Array.isArray(state.xy) && state.xy.length >= 2
     lights.push({
       id: String(id),
+      apiId: String(light.api_id || id),
       name: String(light.name || "Light " + id),
       on: !!state.on,
       bri: hasBri ? Math.max(1, Math.min(254, state.bri)) : 0,
       hasBri: hasBri,
       ct: hasCt ? Math.max(153, Math.min(500, state.ct)) : 0,
       hasCt: hasCt,
-      hue: hasColor ? state.hue : 0,
-      sat: hasColor ? state.sat : 0,
+      ctMin: Number(light.ct_min || 153),
+      ctMax: Number(light.ct_max || 500),
+      hue: hasColor ? Number(state.hue || 0) : 0,
+      sat: hasColor ? Number(state.sat || 0) : 0,
       hasColor: hasColor,
       colormode: String(state.colormode || ""),
       xy: hasXy ? [Number(state.xy[0]), Number(state.xy[1])] : [],
+      gamut: light.gamut || {},
       pickerOpen: false
     })
   }
@@ -86,6 +94,8 @@ function parseGroups(text) {
     if (type !== "Room" && type !== "Zone") continue
     groups.push({
       id: String(id),
+      apiId: String(group.api_id || id),
+      controlId: String(group.control_id !== undefined ? group.control_id : id),
       name: String(group.name || "Group " + id),
       type: type,
       on: !!(group.state && group.state.any_on),

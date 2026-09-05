@@ -1,6 +1,6 @@
 # omarchy-philips-hue
 
-Omarchy / Quickshell bar widget for controlling Philips Hue lights over the bridge's local HTTP API (v1).
+Omarchy / Quickshell bar widget for controlling Philips Hue lights over the bridge's local HTTPS APIs (v1 and v2).
 
 <p align="center">
   <img src="preview.png" alt="omarchy-philips-hue panel screenshot" width="360">
@@ -16,6 +16,7 @@ Omarchy / Quickshell bar widget for controlling Philips Hue lights over the brid
 - Per-light color temperature slider (warm ⇄ cool white)
 - Per-light color wheel picker (hue + saturation) and color temperature slider;
   both hidden for lights in rooms with theme sync enabled
+- Supports both the classic Hue API v1 and CLIP API v2
 - Reads credentials from `~/.local/state/omarchy/settings/hue.json`
 - Retries / re-fetches state automatically after every change
 
@@ -34,9 +35,11 @@ omarchy plugin add https://github.com/sethchev/omarchy-philips-hue.git --enable
 
 On first run the bar shows a lightbulb icon. Click it to open the panel, then
 click **Pair with bridge**. This opens a terminal — press the link button on
-your Hue bridge when prompted. The script discovers the bridge, requests a
-username, and writes `~/.local/state/omarchy/settings/hue.json`. The panel
-picks up the new credentials automatically within seconds.
+your Hue bridge when prompted. The script discovers the bridge, requests an
+application key, checks whether v2 is available, and writes
+`~/.local/state/omarchy/settings/hue.json`. New pairings use v2 when the
+bridge supports it and otherwise use v1. The panel picks up the new
+credentials automatically within seconds.
 
 You can also pair manually:
 
@@ -45,6 +48,22 @@ You can also pair manually:
 ```
 
 Pass an IP directly to skip auto-discovery: `pair.sh 192.168.1.14`.
+Set `PHILIPS_HUE_API_VERSION=v1` or `v2` to force a version during pairing;
+the default is automatic detection.
+
+### Moving an existing pairing to v2
+
+The v1 username is also the v2 application key, so **you do not need to
+re-pair or press the bridge button**. Verify the existing key and switch the
+plugin atomically with:
+
+```sh
+python3 ~/.config/omarchy/plugins/omarchy-philips-hue/hue-api.py migrate-api v2
+```
+
+Existing credential files without an `apiVersion` remain on v1 until this is
+run. To switch back, use the same command with `v1`. Re-pairing is only needed
+if the key was revoked or the bridge was reset or replaced.
 
 ## Syncing lights with the omarchy theme
 
@@ -90,17 +109,18 @@ The repo ships everything needed under `theme-sync/`:
 ~/.config/omarchy/plugins/omarchy-philips-hue/theme-sync/install.sh
 ```
 
-This copies `45-hue.sh` to `~/.config/omarchy/hooks/theme-set.d/` (make it
+This copies `45-hue.sh` to `~/.config/omarchy/hooks/theme-set.d/` (making it
 executable) and writes a default `hue-theme.json` to
-`~/.config/omarchy/settings/` if you don't have one yet. No shell restart is
-needed — the hook is picked up on the next `omarchy theme set`.
+`~/.config/omarchy/settings/` if you don't have one yet. Existing settings
+are preserved. Re-run the installer after upgrading from a pre-v2 plugin so
+the installed hook uses the shared v1/v2 client. No shell restart is needed —
+the hook is picked up on the next `omarchy theme set`.
 
 To install manually instead:
 
 ```sh
-mkdir -p ~/.config/omarchy/hooks/theme-set.d ~/.config/omarchy/settings
-cp theme-sync/45-hue.sh ~/.config/omarchy/hooks/theme-set.d/45-hue.sh
-chmod +x ~/.config/omarchy/hooks/theme-set.d/45-hue.sh
+mkdir -p ~/.config/omarchy/settings
+omarchy hook install theme-set theme-sync/45-hue.sh
 cp -n theme-sync/hue-theme.json ~/.config/omarchy/settings/hue-theme.json
 chmod 600 ~/.config/omarchy/settings/hue-theme.json
 ```
@@ -174,8 +194,9 @@ plugin so no auth token is left behind.
 
 ## Notes
 
-- Speaks to the bridge over **HTTPS** on your LAN with the v1 API
-  (`/api/<username>/lights`, `/groups`, etc.) — no cloud, no SDK.
+- Speaks to the bridge over **HTTPS** on your LAN — no cloud and no SDK.
+  v1 uses `/api/<username>/...`; v2 uses `/clip/v2/resource/...` with the
+  existing username in the `hue-application-key` header.
 - TLS is verified with the bundled `hue_bridge_cacert.pem`, the official
   Philips Hue root CA from Signify. During pairing, the bridge's unique ID
   is read from `/api/config` and saved as `bridgeId` in `hue.json`; requests
@@ -188,9 +209,9 @@ plugin so no auth token is left behind.
 - If `bridgeId` is missing (e.g. from an older config), the panel warns
   "TLS verification disabled" — re-run `pair.sh` to restore full
   certificate verification.
-- Uses the classic v1 local API, which every current bridge still serves —
-  including the 2025 Bridge Pro (HTTPS-only, `apiversion` 1.73.x). New Hue
-  features ship exclusively in the v2 API and Signify has said v1 will be
-  removed long-term, but no end-of-life date has been announced.
+- Existing installations default to the classic v1 local API for backward
+  compatibility. New pairings prefer CLIP v2. Room and light `id_v1` values
+  are retained as logical IDs when using v2, so room-specific theme settings
+  survive migration.
 - Credentials are stored per-user in `~/.local/state/omarchy/settings/hue.json`;
   keep that file out of version control.

@@ -7,12 +7,17 @@ LOG_FILE="$(dirname "$STATE_DIR")/hue-pair.log"
 CACERT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/hue_bridge_cacert.pem"
 DEVICETYPE="${PHILIPS_HUE_DEVICETYPE:-philips#omarchy-hue}"
 DEVICETYPE="${DEVICETYPE//[^a-zA-Z0-9#_-]/}"
-
+REQUESTED_API="${PHILIPS_HUE_API_VERSION:-auto}"
 BRIDGE_IP="${1:-}"
 
 info() { printf '\033[1;34m::\033[0m %s\n' "$*"; }
 ok()   { printf '\033[1;32m::\033[0m %s\n' "$*"; }
 err()  { printf '\033[1;31m::\033[0m %s\n' "$*" >&2; }
+
+case "$REQUESTED_API" in
+  auto|v1|v2) ;;
+  *) err "PHILIPS_HUE_API_VERSION must be auto, v1, or v2."; exit 1 ;;
+esac
 
 ensure_log_perms() {
   python3 -c "
@@ -101,6 +106,31 @@ PY
   printf '%s\n' "$bridge_id"
 }
 
+probe_v2() {
+  local ip="$1" bridge_id="$2" username="$3"
+  TARGET_IP="$ip" BRIDGE_ID="$bridge_id" HUE_APPLICATION_KEY="$username" CACERT="$CACERT" \
+    python3 - <<'PY' >/dev/null 2>&1
+import json, os, socket, ssl, urllib.request
+ip = os.environ["TARGET_IP"]
+hostname = os.environ["BRIDGE_ID"]
+key = os.environ["HUE_APPLICATION_KEY"]
+original = socket.getaddrinfo
+def resolve(host, port, *args, **kwargs):
+    if host == hostname:
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, port))]
+    return original(host, port, *args, **kwargs)
+socket.getaddrinfo = resolve
+context = ssl.create_default_context(cafile=os.environ["CACERT"])
+request = urllib.request.Request(
+    "https://%s/clip/v2/resource/bridge" % hostname,
+    headers={"hue-application-key": key, "Accept": "application/json"})
+with urllib.request.urlopen(request, timeout=5, context=context) as response:
+    result = json.load(response)
+if result.get("errors") or not isinstance(result.get("data"), list):
+    raise SystemExit(1)
+PY
+}
+
 pair() {
   local ip="$1" bridge_id="$2" response username
   local now ts deadline=$(( $(date +%s) + 90 ))
@@ -157,7 +187,7 @@ ensure_log_perms
 
 if [[ -f "$STATE_FILE" ]] && python3 -c "import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d.get('bridgeIp') else 1)" "$STATE_FILE" 2>/dev/null; then
   info "Existing config found at $STATE_FILE."
-  info "Re-pairing will replace the current username. The old username will stop working."
+  info "Re-pairing will replace the username stored by this plugin."
 fi
 
 local_ip=""
@@ -214,15 +244,34 @@ fi
 ok "Got username: ${username:0:4}***"
 info "Pairing log: $LOG_FILE"
 
-printf '%s\n%s\n%s\n' "$local_ip" "$bridge_id" "$username" | python3 -c "
+api_version="v1"
+if [[ "$REQUESTED_API" != "v1" ]]; then
+  info "Checking Hue API v2 support..."
+  if probe_v2 "$local_ip" "$bridge_id" "$username"; then
+    api_version="v2"
+    ok "Hue API v2 is available."
+  elif [[ "$REQUESTED_API" == "v2" ]]; then
+    err "Hue API v2 was requested but could not be verified."
+    exit 1
+  else
+    info "Hue API v2 is unavailable; using v1."
+  fi
+fi
+
+printf '%s\n%s\n%s\n%s\n' "$local_ip" "$bridge_id" "$username" "$api_version" | python3 -c "
 import json, os, sys
-bridge_ip, bridge_id, username = sys.stdin.read().splitlines()[:3]
-data = json.dumps({'bridgeIp': bridge_ip, 'bridgeId': bridge_id, 'username': username}, indent=2) + '\n'
-fd = os.open('''$STATE_FILE''', os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+bridge_ip, bridge_id, username, api_version = sys.stdin.read().splitlines()[:4]
+data = json.dumps({'bridgeIp': bridge_ip, 'bridgeId': bridge_id, 'username': username, 'apiVersion': api_version}, indent=2) + '\n'
+path = '''$STATE_FILE'''
+temporary = path + '.%d.tmp' % os.getpid()
+fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
 try:
     os.write(fd, data.encode())
+    os.fsync(fd)
 finally:
     os.close(fd)
+os.replace(temporary, path)
+os.chmod(path, 0o600)
 " 2>/dev/null || {
   err "Could not write $STATE_FILE."
   exit 1
@@ -237,7 +286,7 @@ fi
 info "Verifying access..."
 light_count=$(python3 "$(dirname -- "${BASH_SOURCE[0]}")/hue-api.py" verify 2>/dev/null || true)
 if [[ -n "$light_count" ]]; then
-  ok "Connected. Found $light_count light(s)."
+  ok "Connected through Hue API $api_version. Found $light_count light(s)."
 else
   err "Wrote config but couldn't list lights yet. The panel will retry automatically."
 fi

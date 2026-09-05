@@ -38,7 +38,8 @@ Panel {
     if (root.lastFetchFailed) return "Bridge unreachable"
     if (root.loading) return "Loading…"
     var roomLabel = root.lightedRoomCount + " room" + (root.lightedRoomCount === 1 ? "" : "s")
-    return roomLabel + " · " + root.lightTotal + " light" + (root.lightTotal === 1 ? "" : "s")
+    var apiLabel = root.config ? " · Hue " + root.config.apiVersion : ""
+    return roomLabel + " · " + root.lightTotal + " light" + (root.lightTotal === 1 ? "" : "s") + apiLabel
   }
 
   function computeAllLightsOn() {
@@ -125,7 +126,15 @@ Panel {
       var room = root.rooms[i]
       var lights = HueApi.roomLights(room, root.lightsById)
       for (var j = 0; j < room.lightIds.length; j++) used[room.lightIds[j]] = true
-      result.push({ id: room.id, name: room.name, on: room.on, lightCount: lights.length, lights: lights })
+      result.push({
+        id: room.id,
+        apiId: room.apiId,
+        controlId: room.controlId,
+        name: room.name,
+        on: room.on,
+        lightCount: lights.length,
+        lights: lights
+      })
     }
     var orphans = []
     for (var id in root.lightsById) {
@@ -138,17 +147,21 @@ Panel {
   function lightClone(light, changes) {
     return {
       id: light.id,
+      apiId: light.apiId,
       name: light.name,
       on: changes.on !== undefined ? changes.on : light.on,
       bri: changes.bri !== undefined ? changes.bri : light.bri,
       hasBri: light.hasBri,
       ct: changes.ct !== undefined ? changes.ct : light.ct,
       hasCt: light.hasCt,
+      ctMin: light.ctMin,
+      ctMax: light.ctMax,
       hue: changes.hue !== undefined ? changes.hue : light.hue,
       sat: changes.sat !== undefined ? changes.sat : light.sat,
       hasColor: light.hasColor,
       colormode: light.colormode,
       xy: light.xy ? light.xy.slice() : [],
+      gamut: light.gamut || {},
       pickerOpen: changes.pickerOpen !== undefined ? changes.pickerOpen : light.pickerOpen
     }
   }
@@ -163,6 +176,8 @@ Panel {
       var room = root.roomsWithLights[i]
       newRooms.push({
         id: room.id,
+        apiId: room.apiId,
+        controlId: room.controlId,
         name: room.name,
         on: room.id === roomId ? on : room.on,
         lightCount: room.lightCount,
@@ -180,6 +195,8 @@ Panel {
       var room = root.roomsWithLights[i]
       newRooms.push({
         id: room.id,
+        apiId: room.apiId,
+        controlId: room.controlId,
         name: room.name,
         on: room.on,
         lightCount: room.lightCount,
@@ -200,6 +217,8 @@ Panel {
       var room = root.roomsWithLights[i]
       newRooms.push({
         id: room.id,
+        apiId: room.apiId,
+        controlId: room.controlId,
         name: room.name,
         on: room.on,
         lightCount: room.lightCount,
@@ -239,6 +258,13 @@ Panel {
     return null
   }
 
+  function roomById(roomId) {
+    for (var i = 0; i < root.roomsWithLights.length; i++) {
+      if (root.roomsWithLights[i].id === roomId) return root.roomsWithLights[i]
+    }
+    return null
+  }
+
   function roomSyncOn(roomId) {
     return root.themeSync[roomId] !== false
   }
@@ -272,38 +298,48 @@ Panel {
 
   function toggleRoom(roomId, on) {
     if (!root.config) return
+    var room = root.roomById(roomId)
+    if (!room || !room.controlId) return
     root.setRoomOn(roomId, on)
-    root.runAction(HueApi.apiCmd(["put-group", roomId, JSON.stringify({ on: on })]))
+    root.runAction(HueApi.apiCmd(["put-group", room.controlId, JSON.stringify({ on: on })]))
     root.scheduleRefresh()
   }
 
   function toggleLight(lightId, on) {
     if (!root.config) return
+    var light = root.lightById(lightId)
+    if (!light) return
     root.setLightOn(lightId, on)
-    root.runAction(HueApi.apiCmd(["put-light", lightId, JSON.stringify({ on: on })]))
+    root.runAction(HueApi.apiCmd(["put-light", light.apiId, JSON.stringify({ on: on })]))
     root.scheduleRefresh()
   }
 
   function setBrightness(lightId, bri) {
     if (!root.config) return
+    var light = root.lightById(lightId)
+    if (!light) return
     var clamped = Math.max(1, Math.min(254, Math.round(bri)))
     root.setLightBri(lightId, clamped)
-    root.runAction(HueApi.apiCmd(["put-light", lightId, JSON.stringify({ bri: clamped })]))
+    root.runAction(HueApi.apiCmd(["put-light", light.apiId, JSON.stringify({ bri: clamped })]))
     root.scheduleRefresh()
   }
 
   function setColorTemperature(lightId, ct) {
     if (!root.config) return
-    var clamped = Math.max(153, Math.min(500, Math.round(ct)))
+    var light = root.lightById(lightId)
+    if (!light) return
+    var clamped = Math.max(light.ctMin, Math.min(light.ctMax, Math.round(ct)))
     root.setLightCt(lightId, clamped)
-    root.runAction(HueApi.apiCmd(["put-light", lightId, JSON.stringify({ ct: clamped })]))
+    root.runAction(HueApi.apiCmd(["put-light", light.apiId, JSON.stringify({ ct: clamped })]))
     root.scheduleRefresh()
   }
 
   function setLightColor(lightId, hue, sat) {
     if (!root.config) return
+    var light = root.lightById(lightId)
+    if (!light) return
     root.patchLightColor(lightId, hue, sat)
-    root.runAction(HueApi.apiCmd(["put-light", lightId, JSON.stringify({ hue: hue, sat: sat })]))
+    root.runAction(HueApi.apiCmd(["put-light", light.apiId, JSON.stringify({ hue: hue, sat: sat })]))
     root.scheduleRefresh()
   }
 
@@ -312,7 +348,7 @@ Panel {
     var rooms = root.lightedRooms()
     var body = JSON.stringify({ on: on })
     for (var i = 0; i < rooms.length; i++) {
-      root.runAction(HueApi.apiCmd(["put-group", rooms[i].id, body]))
+      if (rooms[i].controlId) root.runAction(HueApi.apiCmd(["put-group", rooms[i].controlId, body]))
     }
     root.setAllOn(on)
     root.scheduleRefresh()
@@ -323,6 +359,8 @@ Panel {
       if (room.lightCount === 0) return room
       return {
         id: room.id,
+        apiId: room.apiId,
+        controlId: room.controlId,
         name: room.name,
         on: on,
         lightCount: room.lightCount,
@@ -880,8 +918,8 @@ Panel {
                       width: parent.width - Style.space(24)
                       anchors.horizontalCenter: parent.horizontalCenter
                       bar: root.bar
-                      minimum: 153
-                      maximum: 500
+                      minimum: modelData.ctMin
+                      maximum: modelData.ctMax
                       integer: true
                       step: 10
                       value: modelData.ct
@@ -1129,8 +1167,8 @@ Panel {
                   width: parent.width - Style.space(24)
                   anchors.horizontalCenter: parent.horizontalCenter
                   bar: root.bar
-                  minimum: 153
-                  maximum: 500
+                  minimum: modelData.ctMin
+                  maximum: modelData.ctMax
                   integer: true
                   step: 10
                   value: modelData.ct
