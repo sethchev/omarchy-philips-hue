@@ -24,6 +24,13 @@ LOG_FILE = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) 
 _SAFE_ID = re.compile(r"^[0-9A-Za-z_-]{1,64}$")
 _UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F-]{27,36}$")
 
+PREBUILT_SCENES = {
+    "relax": {"name": "Relax", "bri": 144, "ct": 447},
+    "read": {"name": "Read", "bri": 240, "ct": 289},
+    "natural light": {"name": "Natural Light", "bri": 254, "ct": 200},
+    "tv mode": {"name": "Tv Mode", "bri": 96, "palette": ["4b2cff", "ff5a1f", "0c8184", "8a2be2"], "ct": 400},
+}
+
 
 class HueError(RuntimeError):
     pass
@@ -411,6 +418,157 @@ class HueClient:
         if self.api_version == "v1":
             return self._request("PUT", "/groups/%s/action" % control_id, body)
         return self._request("PUT", "/grouped_light/%s" % control_id, self._v2_payload(body))
+
+    def get_scenes(self) -> dict:
+        if self.api_version == "v1":
+            scenes = self._request("GET", "/scenes")
+            groups = self._request("GET", "/groups")
+            if not isinstance(scenes, dict) or not isinstance(groups, dict):
+                raise HueError("Invalid Hue v1 scenes response")
+            normalized = {}
+            for scene_id, scene in scenes.items():
+                group_id = str(scene.get("group") or "")
+                if not group_id:
+                    continue
+                active_scene = str(((groups.get(group_id) or {}).get("action") or {}).get("scene") or "")
+                normalized[str(scene_id)] = {
+                    "id": str(scene_id),
+                    "api_id": str(scene_id),
+                    "name": str(scene.get("name") or "Scene %s" % scene_id),
+                    "group": group_id,
+                    "group_api_id": group_id,
+                    "active": active_scene == str(scene_id),
+                }
+            return normalized
+        normalized = {}
+        for scene in self._v2_data("/scene"):
+            metadata = scene.get("metadata") or {}
+            group = scene.get("group") or {}
+            scene_id = str(scene.get("id") or "")
+            group_id = str(group.get("rid") or "") if group.get("rtype") in ("room", "zone") else ""
+            if not scene_id or not group_id:
+                continue
+            normalized[scene_id] = {
+                "id": scene_id,
+                "api_id": scene_id,
+                "name": str(metadata.get("name") or "Scene %s" % scene_id),
+                "group": group_id,
+                "group_api_id": group_id,
+                "active": str((scene.get("status") or {}).get("active") or "inactive") != "inactive",
+            }
+        return normalized
+
+    @staticmethod
+    def _scene_key(name: str) -> str:
+        return re.sub(r"\s+", " ", str(name).strip()).lower()
+
+    @staticmethod
+    def prebuilt_scene_names() -> list[str]:
+        return [PREBUILT_SCENES[key]["name"] for key in ("relax", "read", "natural light", "tv mode")]
+
+    @staticmethod
+    def _prebuilt_scene(name: str) -> dict:
+        scene = PREBUILT_SCENES.get(HueClient._scene_key(name))
+        if not scene:
+            raise HueError("Unknown scene: %s" % name)
+        return scene
+
+    def _scene_body_for_light(self, recipe: dict, light: dict, index: int) -> dict:
+        body = {"on": True, "bri": recipe.get("bri", 200), "transitiontime": 8}
+        palette = recipe.get("palette") or []
+        if palette and light.get("has_color"):
+            hue, saturation = _hex_to_hs(str(palette[index % len(palette)]))
+            body.update({"hue": hue, "sat": saturation})
+        elif light.get("has_ct"):
+            body["ct"] = int(_clamp(float(recipe.get("ct", 300)), light.get("ct_min", 153), light.get("ct_max", 500)))
+        elif light.get("has_color"):
+            # Color-only bulbs cannot use color temperature; use a low-saturation
+            # warm/neutral hue so white scenes still apply visibly.
+            body.update({"hue": 8500, "sat": 48})
+        return body
+
+    def _create_scene(self, name: str, group_id: str, group: dict, lights: dict) -> str:
+        recipe = self._prebuilt_scene(name)
+        light_ids = [light_id for light_id in group.get("lights", []) if light_id in lights]
+        if not light_ids:
+            raise HueError("Scene group has no lights")
+        if self.api_version == "v1":
+            lightstates = {}
+            for index, light_id in enumerate(light_ids):
+                body = self._scene_body_for_light(recipe, lights[light_id], index)
+                body.pop("transitiontime", None)
+                lightstates[str(light_id)] = body
+            result = self._request("POST", "/scenes", {
+                "name": recipe["name"],
+                "type": "GroupScene",
+                "group": str(group_id),
+                "lights": [str(light_id) for light_id in light_ids],
+                "lightstates": lightstates,
+            })
+            if isinstance(result, list):
+                for item in result:
+                    success = item.get("success") if isinstance(item, dict) else None
+                    if isinstance(success, dict):
+                        for key, value in success.items():
+                            if key.endswith("/id"):
+                                return str(value)
+            raise HueError("Hue bridge did not return a scene ID")
+
+        actions = []
+        for index, light_id in enumerate(light_ids):
+            light = lights[light_id]
+            action = self._v2_payload(self._scene_body_for_light(recipe, light, index), light.get("gamut"))
+            action.pop("dynamics", None)
+            actions.append({
+                "target": {"rid": light["api_id"], "rtype": "light"},
+                "action": action,
+            })
+        group_type = str(group.get("type") or "Room").lower()
+        result = self._request("POST", "/scene", {
+            "metadata": {"name": recipe["name"]},
+            "group": {"rid": group["api_id"], "rtype": "zone" if group_type == "zone" else "room"},
+            "actions": actions,
+        })
+        data = result.get("data") if isinstance(result, dict) else None
+        if isinstance(data, list) and data and data[0].get("rid"):
+            return str(data[0]["rid"])
+        raise HueError("Hue bridge did not return a scene ID")
+
+    def recall_scene(self, scene_id: str, group_id: str | None = None):
+        if self.api_version == "v1":
+            if not group_id:
+                raise HueError("Hue v1 scene recall requires a group")
+            if not _SAFE_ID.fullmatch(str(scene_id)):
+                raise HueError("Invalid Hue scene ID")
+            group_id = self._valid_resource_id(group_id)
+            return self._request("PUT", "/groups/%s/action" % group_id, {"scene": str(scene_id)})
+        scene_id = self._valid_resource_id(scene_id, True)
+        return self._request("PUT", "/scene/%s" % scene_id, {"recall": {"action": "active"}})
+
+    def apply_prebuilt_scene(self, name: str, room_id: str | None = None) -> tuple[int, int]:
+        recipe = self._prebuilt_scene(name)
+        state = self.get_state()
+        scenes = self.get_scenes()
+        applied = 0
+        targets = [(group_id, group) for group_id, group in state["groups"].items()
+                   if group.get("type") in ("Room", "Zone") and group.get("lights")
+                   and (room_id is None or str(group_id) == str(room_id))]
+        if room_id is not None and not targets:
+            raise HueError("Room not found or has no lights")
+        wanted = self._scene_key(recipe["name"])
+        for group_id, group in targets:
+            group_api_id = str(group.get("api_id") or group_id)
+            scene = next((item for item in scenes.values()
+                          if self._scene_key(item.get("name", "")) == wanted
+                          and str(item.get("group_api_id") or item.get("group")) == group_api_id), None)
+            if scene is None and self.api_version == "v1":
+                scene = next((item for item in scenes.values()
+                              if self._scene_key(item.get("name", "")) == wanted
+                              and str(item.get("group")) == str(group_id)), None)
+            scene_id = scene["api_id"] if scene else self._create_scene(recipe["name"], group_id, group, state["lights"])
+            self.recall_scene(scene_id, group.get("control_id") or group_id)
+            applied += 1
+        return applied, len(targets)
 
     def verify(self) -> int:
         return len(self.get_lights())

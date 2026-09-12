@@ -107,6 +107,23 @@ function parseGroups(text) {
   return groups
 }
 
+function parseScenes(text) {
+  var obj = parseJsonObject(text)
+  if (!obj) return []
+  var scenes = []
+  for (var id in obj) {
+    if (!Object.prototype.hasOwnProperty.call(obj, id)) continue
+    var scene = obj[id]
+    scenes.push({
+      id: String(scene.id || id),
+      name: String(scene.name || "Scene"),
+      groupApiId: String(scene.group_api_id || scene.group || ""),
+      active: scene.active === true
+    })
+  }
+  return scenes
+}
+
 function roomLights(room, byId) {
   var result = []
   for (var i = 0; i < room.lightIds.length; i++) {

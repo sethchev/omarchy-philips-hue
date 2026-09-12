@@ -137,9 +137,10 @@ class HueClientTests(unittest.TestCase):
         calls = []
         client._request = lambda method, path, body=None: calls.append((method, path, body)) or {}
         client.put_light(V2_RESOURCES[0]["id"], {"on": True})
-        client.put_group(V2_RESOURCES[2]["id"], {"on": False})
+        client.put_group(V2_RESOURCES[2]["id"], {"bri": 127})
         self.assertEqual(calls[0][1], "/light/" + V2_RESOURCES[0]["id"])
         self.assertEqual(calls[1][1], "/grouped_light/" + V2_RESOURCES[2]["id"])
+        self.assertAlmostEqual(calls[1][2]["dimming"]["brightness"], 50.0, delta=0.1)
 
     def test_v2_response_errors_are_not_ignored(self):
         client = hue_client.HueClient(self.creds())
@@ -168,6 +169,80 @@ class HueClientTests(unittest.TestCase):
             self.assertEqual(migrated["username"], original["username"])
             self.assertEqual(migrated["apiVersion"], "v2")
             self.assertEqual(verified, [(original["username"], "v2")])
+
+    def test_v2_scene_listing_normalizes_room_group(self):
+        client = hue_client.HueClient(self.creds())
+        scene_id = "55555555-5555-4555-8555-555555555555"
+        room_id = V2_RESOURCES[1]["id"]
+        client._v2_data = lambda path="": [{
+            "id": scene_id,
+            "type": "scene",
+            "metadata": {"name": "Relax"},
+            "group": {"rid": room_id, "rtype": "room"},
+            "status": {"active": "static"},
+        }]
+        scenes = client.get_scenes()
+        self.assertEqual(scenes[scene_id]["name"], "Relax")
+        self.assertEqual(scenes[scene_id]["group_api_id"], room_id)
+        self.assertTrue(scenes[scene_id]["active"])
+
+    def test_prebuilt_scene_recipe_uses_capabilities(self):
+        client = hue_client.HueClient(self.creds())
+        light = {
+            "has_color": False,
+            "has_ct": True,
+            "ct_min": 153,
+            "ct_max": 454,
+        }
+        body = client._scene_body_for_light(hue_client.PREBUILT_SCENES["natural light"], light, 0)
+        self.assertEqual(body["on"], True)
+        self.assertEqual(body["bri"], 254)
+        self.assertEqual(body["ct"], 200)
+
+    def test_apply_prebuilt_scene_reuses_existing_scene(self):
+        client = hue_client.HueClient(self.creds())
+        client.get_state = lambda: client._normalize_v2(V2_RESOURCES)
+        scene_id = "55555555-5555-4555-8555-555555555555"
+        client.get_scenes = lambda: {
+            scene_id: {
+                "api_id": scene_id,
+                "name": "Relax",
+                "group": V2_RESOURCES[1]["id"],
+                "group_api_id": V2_RESOURCES[1]["id"],
+            }
+        }
+        recalled = []
+        client.recall_scene = lambda sid, group_id=None: recalled.append((sid, group_id))
+        client._create_scene = mock.Mock()
+        self.assertEqual(client.apply_prebuilt_scene("Relax"), (1, 1))
+        self.assertEqual(recalled, [(scene_id, V2_RESOURCES[2]["id"])])
+        client._create_scene.assert_not_called()
+
+    def test_apply_prebuilt_scene_creates_missing_scene(self):
+        client = hue_client.HueClient(self.creds())
+        client.get_state = lambda: client._normalize_v2(V2_RESOURCES)
+        client.get_scenes = lambda: {}
+        created_id = "55555555-5555-4555-8555-555555555555"
+        client._create_scene = mock.Mock(return_value=created_id)
+        recalled = []
+        client.recall_scene = lambda sid, group_id=None: recalled.append((sid, group_id))
+        self.assertEqual(client.apply_prebuilt_scene("Natural Light"), (1, 1))
+        client._create_scene.assert_called_once()
+        self.assertEqual(client._create_scene.call_args.args[0], "Natural Light")
+        self.assertEqual(recalled, [(created_id, V2_RESOURCES[2]["id"])])
+
+    def test_apply_prebuilt_scene_targets_selected_room_only(self):
+        client = hue_client.HueClient(self.creds())
+        state = client._normalize_v2(V2_RESOURCES)
+        other_room = dict(state["groups"]["4"], api_id="66666666-6666-4666-8666-666666666666")
+        state["groups"]["5"] = other_room
+        client.get_state = lambda: state
+        client.get_scenes = lambda: {}
+        client._create_scene = mock.Mock(return_value="55555555-5555-4555-8555-555555555555")
+        client.recall_scene = mock.Mock()
+        self.assertEqual(client.apply_prebuilt_scene("Read", "4"), (1, 1))
+        self.assertEqual(client._create_scene.call_args.args[1], "4")
+        client.recall_scene.assert_called_once()
 
     def test_secure_json_write_is_private_and_atomic(self):
         with tempfile.TemporaryDirectory() as directory:

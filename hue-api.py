@@ -57,7 +57,13 @@ def main(argv: list[str]) -> int:
         return 0
 
     client = HueClient()
-    if operation == "get-state":
+    if operation == "get-scenes":
+        print(json.dumps(client.get_scenes()))
+    elif operation == "apply-scene" and len(argv) >= 3:
+        room_id = argv[3] if len(argv) >= 4 else None
+        applied, total = client.apply_prebuilt_scene(argv[2], room_id)
+        print("Applied scene to %d/%d room(s)." % (applied, total))
+    elif operation == "get-state":
         print(json.dumps(client.get_state()))
     elif operation == "get-lights":
         print(json.dumps(client.get_lights()))

@@ -10,8 +10,10 @@ Omarchy / Quickshell bar widget for controlling Philips Hue lights over the brid
 
 - Bar icon (lightbulb) that opens a control panel
 - Toggle all rooms, individual rooms, or single lights
+- Per-room Scenes dropdown with Relax, Read, Natural Light, and Tv Mode presets; existing bridge scenes are reused and missing presets are created automatically
 - Every room and light row is tinted with the bulb's current color
   (hue/sat, color temperature, or XY as reported by the bridge)
+- Per-room brightness slider for dimming or brightening every light in a room together
 - Per-light brightness slider
 - Per-light color temperature slider (warm ⇄ cool white)
 - Per-light color wheel picker (hue + saturation) and color temperature slider;
@@ -64,6 +66,21 @@ python3 ~/.config/omarchy/plugins/omarchy-philips-hue/hue-api.py migrate-api v2
 Existing credential files without an `apiVersion` remain on v1 until this is
 run. To switch back, use the same command with `v1`. Re-pairing is only needed
 if the key was revoked or the bridge was reset or replaced.
+
+## Scenes
+
+Open a room in the panel, expand its **Scenes** menu, and choose one of four built-in presets for that room:
+
+- **Relax** — warm, comfortable, lower-brightness white
+- **Read** — brighter warm white for reading
+- **Natural Light** — bright neutral/cool daylight
+- **Tv Mode** — dim accent lighting for color-capable bulbs, with warm fallback for white-only bulbs
+
+When you choose a scene, the plugin first looks for a same-named Hue scene for
+that room/zone and recalls it only there. If the bridge does not already have that preset
+for a room, the plugin creates a room-scoped scene from the built-in recipe and
+then recalls it. This keeps existing Hue app scenes intact while filling in
+missing presets such as Natural Light.
 
 ## Syncing lights with the omarchy theme
 

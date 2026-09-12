@@ -18,6 +18,7 @@ Panel {
   property string currentThemeName: ""
   property var lightsById: ({})
   property var rooms: []
+  property var scenes: []
   property var roomsWithLights: []
   property var orphanLights: []
   property int pendingFetches: 0
@@ -25,6 +26,10 @@ Panel {
   property bool lastFetchFailed: false
   property var actionQueue: []
   property var expandedRooms: ({})
+  property var expandedSceneMenus: ({})
+  property string sceneStatus: ""
+  property string sceneStatusRoomId: ""
+  readonly property var prebuiltScenes: ["Relax", "Read", "Natural Light", "Tv Mode"]
 
   readonly property int roomCount: root.roomsWithLights.length
   readonly property int lightTotal: root.lightsTotal()
@@ -98,16 +103,19 @@ Panel {
     if (root.roomsWithLights.length === 0 && root.orphanLights.length === 0) root.loading = true
     lightsProc.running = false
     groupsProc.running = false
+    scenesProc.running = false
     Qt.callLater(startFetches)
   }
 
   function startFetches() {
     if (!root.config) return
-    root.pendingFetches = 2
+    root.pendingFetches = 3
     lightsProc.command = HueApi.apiCmd(["get-lights"])
     groupsProc.command = HueApi.apiCmd(["get-groups"])
+    scenesProc.command = HueApi.apiCmd(["get-scenes"])
     lightsProc.running = true
     groupsProc.running = true
+    scenesProc.running = true
   }
 
   function finishFetch(success) {
@@ -187,6 +195,47 @@ Panel {
       })
     }
     root.roomsWithLights = newRooms
+  }
+
+  function roomHasBrightness(room) {
+    for (var i = 0; i < room.lights.length; i++) {
+      if (room.lights[i].hasBri) return true
+    }
+    return false
+  }
+
+  function roomBrightness(room) {
+    var total = 0
+    var count = 0
+    for (var i = 0; i < room.lights.length; i++) {
+      if (!room.lights[i].hasBri) continue
+      total += room.lights[i].bri
+      count++
+    }
+    return count > 0 ? Math.round(total / count) : 1
+  }
+
+  function setRoomBrightness(roomId, bri) {
+    if (!root.config) return
+    var target = root.roomById(roomId)
+    if (!target || !target.controlId) return
+    var clamped = Math.max(1, Math.min(254, Math.round(bri)))
+    root.roomsWithLights = root.roomsWithLights.map(function(room) {
+      if (room.id !== roomId) return room
+      return {
+        id: room.id,
+        apiId: room.apiId,
+        controlId: room.controlId,
+        name: room.name,
+        on: room.on,
+        lightCount: room.lightCount,
+        lights: room.lights.map(function(light) {
+          return light.hasBri ? root.lightClone(light, { bri: clamped }) : light
+        })
+      }
+    })
+    root.runAction(HueApi.apiCmd(["put-group", target.controlId, JSON.stringify({ bri: clamped })]))
+    root.scheduleRefresh()
   }
 
   function setLightOn(lightId, on) {
@@ -289,6 +338,34 @@ Panel {
     var map = JSON.parse(JSON.stringify(root.expandedRooms))
     map[roomId] = map[roomId] !== true
     root.expandedRooms = map
+  }
+
+  function roomScenesExpanded(roomId) {
+    return root.expandedSceneMenus[roomId] === true
+  }
+
+  function roomSceneActive(room, sceneName) {
+    var wanted = String(sceneName).trim().toLowerCase()
+    for (var i = 0; i < root.scenes.length; i++) {
+      var scene = root.scenes[i]
+      if (scene.active && scene.groupApiId === room.apiId && scene.name.trim().toLowerCase() === wanted) return true
+    }
+    return false
+  }
+
+  function toggleRoomScenes(roomId) {
+    var map = JSON.parse(JSON.stringify(root.expandedSceneMenus))
+    map[roomId] = map[roomId] !== true
+    root.expandedSceneMenus = map
+  }
+
+  function applyScene(roomId, sceneName) {
+    if (!root.config) return
+    root.sceneStatusRoomId = roomId
+    root.sceneStatus = "Applying " + sceneName + "…"
+    root.runAction(HueApi.apiCmd(["apply-scene", sceneName, roomId]))
+    root.scheduleRefresh()
+    sceneStatusTimer.restart()
   }
 
   function toggleColorPicker(lightId) {
@@ -456,6 +533,15 @@ Panel {
   }
 
   Timer {
+    id: sceneStatusTimer
+    interval: 2500
+    onTriggered: {
+      root.sceneStatus = ""
+      root.sceneStatusRoomId = ""
+    }
+  }
+
+  Timer {
     id: pollTimer
     interval: 15000
     repeat: true
@@ -495,8 +581,23 @@ Panel {
   }
 
   Process {
+    id: scenesProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.scenes = HueApi.parseScenes(text)
+        root.finishFetch(true)
+      }
+    }
+    onExited: function(exitCode) {
+      if (exitCode !== 0) root.finishFetch(false)
+    }
+  }
+
+  Process {
     id: actionProc
     onExited: function(exitCode) {
+      root.scheduleRefresh()
       root.drainActionQueue()
     }
   }
@@ -791,6 +892,35 @@ Panel {
                 }
 
                 Row {
+                  id: roomBrightnessRow
+                  visible: roomColumn.lightsOpen && root.roomHasBrightness(roomColumn.modelData)
+                  width: parent.width - Style.space(24)
+                  anchors.horizontalCenter: parent.horizontalCenter
+                  spacing: Style.space(10)
+
+                  Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "Brightness"
+                    color: Qt.darker(root.bar.foreground, 1.35)
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    font.bold: true
+                  }
+
+                  PanelSlider {
+                    width: parent.width - x
+                    anchors.verticalCenter: parent.verticalCenter
+                    bar: root.bar
+                    minimum: 1
+                    maximum: 254
+                    integer: true
+                    step: 10
+                    value: root.roomBrightness(roomColumn.modelData)
+                    onReleased: function(v) { root.setRoomBrightness(roomColumn.modelData.id, v) }
+                  }
+                }
+
+                Row {
                   id: syncRow
                   visible: modelData.on && roomColumn.lightsOpen
                   width: parent.width
@@ -831,6 +961,118 @@ Panel {
                       root.sceneRooms = ss
                       actionProc.command = HueApi.apiCmd(["write-scene-config", JSON.stringify(ss)])
                       actionProc.running = true
+                    }
+                  }
+                }
+
+                Column {
+                  visible: roomColumn.lightsOpen
+                  width: parent.width
+                  spacing: Style.space(2)
+
+                  BorderSurface {
+                    id: roomScenesHeader
+                    width: parent.width
+                    radius: Style.cornerRadius
+                    implicitHeight: Math.max(42, Style.font.body + Style.spacing.huge)
+                    readonly property bool menuOpen: root.roomScenesExpanded(roomColumn.modelData.id)
+                    readonly property bool hot: roomScenesMouse.containsMouse || activeFocus || menuOpen
+                    color: Style.controlFill(activeFocus, hot, root.bar.foreground, Color.accent)
+                    borderSpec: Border.controlSpec(activeFocus ? "focus" : (hot ? "hover-cursor" : "normal"), root.bar.foreground, Color.accent)
+
+                    activeFocusOnTab: true
+                    Keys.onReturnPressed: root.toggleRoomScenes(roomColumn.modelData.id)
+                    Keys.onEnterPressed: root.toggleRoomScenes(roomColumn.modelData.id)
+                    Keys.onSpacePressed: root.toggleRoomScenes(roomColumn.modelData.id)
+
+                    MouseArea {
+                      id: roomScenesMouse
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.toggleRoomScenes(roomColumn.modelData.id)
+                    }
+
+                    Text {
+                      anchors.left: parent.left
+                      anchors.leftMargin: parent.borderLeft + Style.spacing.rowPaddingX
+                      anchors.right: sceneArrow.left
+                      anchors.rightMargin: Style.spacing.rowPaddingX
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: root.sceneStatus !== "" && root.sceneStatusRoomId === roomColumn.modelData.id
+                        ? root.sceneStatus : "Scenes"
+                      textFormat: Text.PlainText
+                      elide: Text.ElideRight
+                      color: root.bar.foreground
+                      font.family: root.bar.fontFamily
+                      font.pixelSize: Style.font.body
+                      font.bold: true
+                    }
+
+                    Text {
+                      id: sceneArrow
+                      anchors.right: parent.right
+                      anchors.rightMargin: parent.borderRight + Style.spacing.rowPaddingX
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: "\u25b8"
+                      color: roomScenesHeader.menuOpen ? Color.accent : Qt.darker(root.bar.foreground, 1.4)
+                      font.family: root.bar.fontFamily
+                      font.pixelSize: Style.font.body
+                      rotation: roomScenesHeader.menuOpen ? 90 : 0
+                      transformOrigin: Item.Center
+                      Behavior on rotation { NumberAnimation { duration: 120 } }
+                    }
+                  }
+
+                  Grid {
+                    id: roomSceneGrid
+                    visible: roomScenesHeader.menuOpen
+                    width: parent.width
+                    columns: 2
+                    spacing: Style.space(2)
+
+                    Repeater {
+                      model: root.prebuiltScenes
+
+                      BorderSurface {
+                        id: roomSceneTile
+                        required property string modelData
+                        width: (roomSceneGrid.width - roomSceneGrid.spacing) / 2
+                        height: Math.max(46, Style.font.body + Style.spacing.huge)
+                        radius: Style.cornerRadius
+                        readonly property bool sceneActive: root.roomSceneActive(roomColumn.modelData, modelData)
+                        readonly property bool hot: roomSceneMouse.containsMouse || activeFocus
+                        color: sceneActive
+                          ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, hot ? 0.34 : 0.24)
+                          : Style.controlFill(activeFocus, hot, Qt.darker(root.bar.foreground, 1.2), Color.accent)
+                        borderSpec: Border.controlSpec(sceneActive ? "focus" : (activeFocus ? "focus" : (hot ? "hover-cursor" : "normal")), Qt.darker(root.bar.foreground, 1.2), Color.accent)
+
+                        activeFocusOnTab: true
+                        Keys.onReturnPressed: root.applyScene(roomColumn.modelData.id, modelData)
+                        Keys.onEnterPressed: root.applyScene(roomColumn.modelData.id, modelData)
+                        Keys.onSpacePressed: root.applyScene(roomColumn.modelData.id, modelData)
+
+                        MouseArea {
+                          id: roomSceneMouse
+                          anchors.fill: parent
+                          hoverEnabled: true
+                          cursorShape: Qt.PointingHandCursor
+                          onClicked: root.applyScene(roomColumn.modelData.id, roomSceneTile.modelData)
+                        }
+
+                        Text {
+                          anchors.centerIn: parent
+                          width: parent.width - Style.space(12)
+                          text: (roomSceneTile.sceneActive ? "✓ " : "") + roomSceneTile.modelData
+                          textFormat: Text.PlainText
+                          horizontalAlignment: Text.AlignHCenter
+                          wrapMode: Text.WordWrap
+                          color: roomSceneTile.sceneActive ? Color.accent : Qt.darker(root.bar.foreground, 1.2)
+                          font.family: root.bar.fontFamily
+                          font.pixelSize: Style.font.body
+                          font.bold: true
+                        }
+                      }
                     }
                   }
                 }
