@@ -71,15 +71,18 @@ print((ipv4[0] if ipv4 else (ips[0] if ips else '')), (ids[0].lower() if ids els
 }
 
 discover_bridge_cloud() {
-  local response ip
-  response=$(curl -fsS --max-time 5 https://discovery.meethue.com/ 2>/dev/null || true)
-  [[ -z "$response" ]] && return 1
-  ip=$(python3 -c "
-import json, sys
-d = json.load(sys.stdin)
-ips = [x.get('internalipaddress', '') for x in d if x.get('internalipaddress')]
-print(ips[0] if ips else '')
-" <<<"$response")
+  local ip
+  ip=$(python3 - <<'PY' 2>/dev/null || true
+import json, urllib.request
+with urllib.request.urlopen("https://discovery.meethue.com/", timeout=5) as response:
+    data = json.load(response)
+for item in data if isinstance(data, list) else []:
+    ip = item.get("internalipaddress", "") if isinstance(item, dict) else ""
+    if ip:
+        print(ip)
+        break
+PY
+  )
   [[ -n "$ip" ]] || return 1
   printf '%s\n' "$ip"
 }
@@ -135,10 +138,28 @@ pair() {
   local ip="$1" bridge_id="$2" response username
   local now ts deadline=$(( $(date +%s) + 90 ))
   while :; do
-    response=$(curl -fsS --max-time 5 --cacert "$CACERT" \
-      --resolve "${bridge_id}:443:${ip}" \
-      -X POST -H "Content-Type: application/json" \
-      -d "{\"devicetype\":\"$DEVICETYPE\"}" "https://${bridge_id}/api" 2>/dev/null || true)
+    response=$(TARGET_IP="$ip" BRIDGE_ID="$bridge_id" DEVICETYPE="$DEVICETYPE" CACERT="$CACERT" python3 - <<'PY' 2>/dev/null || true
+import json, os, socket, ssl, urllib.request
+ip = os.environ["TARGET_IP"]
+hostname = os.environ["BRIDGE_ID"]
+devicetype = os.environ["DEVICETYPE"]
+original = socket.getaddrinfo
+def resolve(host, port, *args, **kwargs):
+    if host == hostname:
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, port))]
+    return original(host, port, *args, **kwargs)
+socket.getaddrinfo = resolve
+context = ssl.create_default_context(cafile=os.environ["CACERT"])
+request = urllib.request.Request(
+    "https://%s/api" % hostname,
+    data=json.dumps({"devicetype": devicetype}).encode(),
+    headers={"Content-Type": "application/json"},
+    method="POST",
+)
+with urllib.request.urlopen(request, timeout=5, context=context) as response:
+    print(response.read().decode("utf-8", "replace"))
+PY
+    )
     ts=$(date +'%Y-%m-%d %H:%M:%S')
     local redacted
     redacted=$(printf '%s' "${response:-<empty>}" | python3 -c "

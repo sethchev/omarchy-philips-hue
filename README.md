@@ -25,7 +25,7 @@ Omarchy / Quickshell bar widget for controlling Philips Hue lights over the brid
 ## Requirements
 
 - Arch Linux + Omarchy (Quickshell-based shell)
-- `curl`, `python3` (for the pairing script), `omarchy-shell`
+- `python3` (for the pairing script), `omarchy-shell`
 
 ## Install
 
@@ -123,13 +123,13 @@ restart needed.
 The repo ships everything needed under `theme-sync/`:
 
 ```sh
-~/.config/omarchy/plugins/omarchy-philips-hue/theme-sync/install.sh
+~/.config/omarchy/plugins/omarchy-philips-hue/theme-sync/enable-theme-sync.sh
 ```
 
 This copies `45-hue.sh` to `~/.config/omarchy/hooks/theme-set.d/` (making it
 executable) and writes a default `hue-theme.json` to
 `~/.config/omarchy/settings/` if you don't have one yet. Existing settings
-are preserved. Re-run the installer after upgrading from a pre-v2 plugin so
+are preserved. Re-run the theme-sync installer after upgrading from a pre-v2 plugin so
 the installed hook uses the shared v1/v2 client. No shell restart is needed —
 the hook is picked up on the next `omarchy theme set`.
 
