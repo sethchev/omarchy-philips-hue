@@ -18,6 +18,16 @@ Omarchy / Quickshell bar widget for controlling Philips Hue lights over the brid
 - Per-light color temperature slider (warm ⇄ cool white)
 - Per-light color wheel picker (hue + saturation) and color temperature slider;
   both hidden for lights in rooms with theme sync enabled
+- Favorite rooms stay pinned at the top of the panel; use the star beside a room
+  (favorites are stored in `hue-theme.json`)
+- Preview the active theme on an opted-in room immediately from its expanded controls
+- Bridge failures and unreachable lights are shown in the panel, with the last
+  successful refresh time and a manual retry; polling backs off while the bridge
+  is unreachable and pauses while the panel is closed
+- State refreshes are serialized and validate command output before updating the
+  panel, preventing overlapping requests or partial results from appearing as a
+  successful refresh
+- Keyboard-accessible room, favorite, and scene controls
 - Supports both the classic Hue API v1 and CLIP API v2
 - Reads credentials from `~/.local/state/omarchy/settings/hue.json`
 - Retries / re-fetches state automatically after every change

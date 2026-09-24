@@ -335,7 +335,7 @@ class HueClient:
                 "api_id": str(resource.get("id") or logical_id),
                 "device_id": device_id,
                 "state": {
-                    "on": on, "bri": max(1, bri) if has_bri else 0,
+                    "on": on, "reachable": True, "bri": max(1, bri) if has_bri else 0,
                     "ct": ct, "hue": hue, "sat": sat,
                     "xy": xy, "colormode": "xy" if has_color else ("ct" if has_ct else "")
                 },

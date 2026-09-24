@@ -63,6 +63,7 @@ function parseLights(text) {
       id: String(id),
       apiId: String(light.api_id || id),
       name: String(light.name || "Light " + id),
+      reachable: state.reachable !== false,
       on: !!state.on,
       bri: hasBri ? Math.max(1, Math.min(254, state.bri)) : 0,
       hasBri: hasBri,

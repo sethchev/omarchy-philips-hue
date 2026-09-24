@@ -99,6 +99,7 @@ class HueClientTests(unittest.TestCase):
         room = state["groups"]["4"]
         self.assertEqual(light["api_id"], V2_RESOURCES[0]["id"])
         self.assertEqual(light["state"]["bri"], 127)
+        self.assertTrue(light["state"]["reachable"])
         self.assertEqual(light["ct_max"], 454)
         self.assertEqual(room["lights"], ["7"])
         self.assertEqual(room["control_id"], V2_RESOURCES[2]["id"])

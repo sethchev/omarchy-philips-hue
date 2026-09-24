@@ -22,8 +22,13 @@ Panel {
   property var roomsWithLights: []
   property var orphanLights: []
   property int pendingFetches: 0
+  property bool fetchScheduled: false
+  property bool refreshRequested: false
   property bool loading: false
   property bool lastFetchFailed: false
+  property int consecutiveFetchFailures: 0
+  property string lastSuccessfulFetch: ""
+  property var favoriteRooms: ({})
   property var actionQueue: []
   property var expandedRooms: ({})
   property var expandedSceneMenus: ({})
@@ -40,11 +45,15 @@ Panel {
 
   readonly property string statusText: {
     if (root.config === null) return "Not paired"
-    if (root.lastFetchFailed) return "Bridge unreachable"
+    var refreshed = root.lastSuccessfulFetch ? " · Updated " + root.lastSuccessfulFetch : ""
+    if (root.lastFetchFailed) return "Bridge unreachable" + refreshed
     if (root.loading) return "Loading…"
     var roomLabel = root.lightedRoomCount + " room" + (root.lightedRoomCount === 1 ? "" : "s")
+    var unreachable = root.unreachableLightCount()
+    var lightLabel = root.lightTotal + " light" + (root.lightTotal === 1 ? "" : "s")
+    if (unreachable > 0) lightLabel += " · " + unreachable + " unreachable"
     var apiLabel = root.config ? " · Hue " + root.config.apiVersion : ""
-    return roomLabel + " · " + root.lightTotal + " light" + (root.lightTotal === 1 ? "" : "s") + apiLabel
+    return roomLabel + " · " + lightLabel + apiLabel + refreshed
   }
 
   function computeAllLightsOn() {
@@ -61,7 +70,19 @@ Panel {
     for (var i = 0; i < root.roomsWithLights.length; i++) {
       if (root.roomsWithLights[i].lightCount > 0) result.push(root.roomsWithLights[i])
     }
+    result.sort(function(a, b) {
+      var af = root.favoriteRooms[a.id] === true
+      var bf = root.favoriteRooms[b.id] === true
+      return af === bf ? a.name.localeCompare(b.name) : (af ? -1 : 1)
+    })
     return result
+  }
+
+  function toggleFavorite(roomId) {
+    var favorites = JSON.parse(JSON.stringify(root.favoriteRooms))
+    favorites[roomId] = favorites[roomId] !== true
+    root.favoriteRooms = favorites
+    root.runAction(HueApi.apiCmd(["write-favorite-config", JSON.stringify(favorites)]))
   }
 
   function emptyRooms() {
@@ -78,6 +99,19 @@ Panel {
       total += root.roomsWithLights[i].lightCount
     }
     return total + root.orphanLights.length
+  }
+
+  function unreachableLightCount() {
+    var count = 0
+    for (var i = 0; i < root.roomsWithLights.length; i++) {
+      for (var j = 0; j < root.roomsWithLights[i].lights.length; j++) {
+        if (root.roomsWithLights[i].lights[j].reachable === false) count++
+      }
+    }
+    for (var k = 0; k < root.orphanLights.length; k++) {
+      if (root.orphanLights[k].reachable === false) count++
+    }
+    return count
   }
 
   function open() {
@@ -99,31 +133,82 @@ Panel {
       configFile.reload()
       return
     }
-    root.lastFetchFailed = false
+    if (root.pendingFetches > 0 || root.fetchScheduled) {
+      root.refreshRequested = true
+      return
+    }
     if (root.roomsWithLights.length === 0 && root.orphanLights.length === 0) root.loading = true
-    lightsProc.running = false
-    groupsProc.running = false
-    scenesProc.running = false
+    root.fetchScheduled = true
     Qt.callLater(startFetches)
   }
 
   function startFetches() {
+    root.fetchScheduled = false
     if (!root.config) return
+    if (root.pendingFetches > 0) {
+      root.refreshRequested = true
+      return
+    }
+    root.lastFetchFailed = false
     root.pendingFetches = 3
-    lightsProc.command = HueApi.apiCmd(["get-lights"])
-    groupsProc.command = HueApi.apiCmd(["get-groups"])
-    scenesProc.command = HueApi.apiCmd(["get-scenes"])
-    lightsProc.running = true
-    groupsProc.running = true
-    scenesProc.running = true
+    prepareFetch(lightsProc, ["get-lights"])
+    prepareFetch(groupsProc, ["get-groups"])
+    prepareFetch(scenesProc, ["get-scenes"])
+  }
+
+  function prepareFetch(proc, args) {
+    proc.fetchOutput = ""
+    proc.fetchOutputFinished = false
+    proc.fetchExitCode = -1
+    proc.fetchExited = false
+    proc.fetchReported = false
+    proc.command = HueApi.apiCmd(args)
+    proc.running = true
+  }
+
+  function tryCompleteFetch(proc) {
+    if (proc.fetchReported || !proc.fetchOutputFinished || !proc.fetchExited) return
+    proc.fetchReported = true
+    var success = proc.fetchExitCode === 0
+    if (success) {
+      try {
+        var parsed = JSON.parse(proc.fetchOutput)
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) success = false
+        else if (proc.fetchKind === "lights") {
+          var lights = HueApi.parseLights(proc.fetchOutput)
+          var byId = {}
+          for (var i = 0; i < lights.length; i++) byId[lights[i].id] = lights[i]
+          root.lightsById = byId
+        } else if (proc.fetchKind === "groups") {
+          root.rooms = HueApi.parseGroups(proc.fetchOutput)
+        } else if (proc.fetchKind === "scenes") {
+          root.scenes = HueApi.parseScenes(proc.fetchOutput)
+        }
+      } catch (error) {
+        success = false
+      }
+    }
+    root.finishFetch(success)
   }
 
   function finishFetch(success) {
+    if (root.pendingFetches <= 0) return
     root.pendingFetches--
     if (success === false) root.lastFetchFailed = true
-    if (root.pendingFetches <= 0) {
+    if (root.pendingFetches === 0) {
       root.loading = false
+      if (root.lastFetchFailed) root.consecutiveFetchFailures++
+      else {
+        root.consecutiveFetchFailures = 0
+        root.lastSuccessfulFetch = new Date().toLocaleTimeString()
+      }
       root.assembleRooms()
+      if (root.refreshRequested) {
+        root.refreshRequested = false
+        root.refresh()
+      } else if (root.opened) {
+        pollTimer.restart()
+      }
     }
   }
 
@@ -498,16 +583,19 @@ Panel {
       try {
         var parsed = JSON.parse(text())
         root.themeSync = parsed.themeSync || {}
+        root.favoriteRooms = parsed.favoriteRooms || {}
         root.sceneRooms = parsed.sceneRooms || {}
         root.sceneDefault = parsed.scene === true
       } catch (e) {
         root.themeSync = {}
+        root.favoriteRooms = {}
         root.sceneRooms = {}
         root.sceneDefault = false
       }
     }
     onLoadFailed: {
       root.themeSync = {}
+      root.favoriteRooms = {}
       root.sceneRooms = {}
       root.sceneDefault = false
     }
@@ -543,54 +631,79 @@ Panel {
 
   Timer {
     id: pollTimer
-    interval: 15000
+    interval: root.consecutiveFetchFailures > 0
+      ? Math.min(120000, 15000 * Math.pow(2, root.consecutiveFetchFailures)) : 15000
     repeat: true
-    running: root.config !== null
+    running: root.config !== null && root.opened
     onTriggered: root.refresh()
   }
 
   Process {
     id: lightsProc
+    property string fetchKind: "lights"
+    property string fetchOutput: ""
+    property bool fetchOutputFinished: false
+    property int fetchExitCode: -1
+    property bool fetchExited: false
+    property bool fetchReported: false
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        var lights = HueApi.parseLights(text)
-        var byId = {}
-        for (var i = 0; i < lights.length; i++) byId[lights[i].id] = lights[i]
-        root.lightsById = byId
-        root.finishFetch(true)
+        lightsProc.fetchOutput = text
+        lightsProc.fetchOutputFinished = true
+        root.tryCompleteFetch(lightsProc)
       }
     }
     onExited: function(exitCode) {
-      if (exitCode !== 0) root.finishFetch(false)
+      fetchExitCode = exitCode
+      fetchExited = true
+      root.tryCompleteFetch(lightsProc)
     }
   }
 
   Process {
     id: groupsProc
+    property string fetchKind: "groups"
+    property string fetchOutput: ""
+    property bool fetchOutputFinished: false
+    property int fetchExitCode: -1
+    property bool fetchExited: false
+    property bool fetchReported: false
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        root.rooms = HueApi.parseGroups(text)
-        root.finishFetch(true)
+        groupsProc.fetchOutput = text
+        groupsProc.fetchOutputFinished = true
+        root.tryCompleteFetch(groupsProc)
       }
     }
     onExited: function(exitCode) {
-      if (exitCode !== 0) root.finishFetch(false)
+      fetchExitCode = exitCode
+      fetchExited = true
+      root.tryCompleteFetch(groupsProc)
     }
   }
 
   Process {
     id: scenesProc
+    property string fetchKind: "scenes"
+    property string fetchOutput: ""
+    property bool fetchOutputFinished: false
+    property int fetchExitCode: -1
+    property bool fetchExited: false
+    property bool fetchReported: false
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        root.scenes = HueApi.parseScenes(text)
-        root.finishFetch(true)
+        scenesProc.fetchOutput = text
+        scenesProc.fetchOutputFinished = true
+        root.tryCompleteFetch(scenesProc)
       }
     }
     onExited: function(exitCode) {
-      if (exitCode !== 0) root.finishFetch(false)
+      fetchExitCode = exitCode
+      fetchExited = true
+      root.tryCompleteFetch(scenesProc)
     }
   }
 
@@ -756,11 +869,40 @@ Panel {
           Text {
             visible: root.config !== null && root.lastFetchFailed && !root.loading
             width: parent.width
-            text: "Couldn't reach the bridge. Check the bridge is on and the IP is still valid, then re-run pair.sh."
+            text: "Couldn't reach the bridge. Check that it's on and the IP is valid. Retrying automatically with increasing delays."
             color: Color.urgent
             font.family: root.bar.fontFamily
             font.pixelSize: Style.font.caption
             wrapMode: Text.WordWrap
+          }
+
+          BorderSurface {
+            visible: root.config !== null && root.lastFetchFailed
+            width: parent.width
+            height: Style.space(40)
+            radius: Style.cornerRadius
+            color: Style.controlFill(activeFocus, retryMouse.containsMouse, root.bar.foreground, Color.accent)
+            borderSpec: Border.controlSpec(activeFocus ? "focus" : (retryMouse.containsMouse ? "hover-cursor" : "normal"), root.bar.foreground, Color.accent)
+            activeFocusOnTab: true
+            Accessible.role: Accessible.Button
+            Accessible.name: "Retry Hue bridge connection now"
+            Keys.onReturnPressed: root.refresh()
+            Keys.onEnterPressed: root.refresh()
+            Keys.onSpacePressed: root.refresh()
+            Text {
+              anchors.centerIn: parent
+              text: "Retry now"
+              color: root.bar.foreground
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.body
+            }
+            MouseArea {
+              id: retryMouse
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: root.refresh()
+            }
           }
 
           Text {
@@ -818,6 +960,8 @@ Panel {
                   Behavior on color { ColorAnimation { duration: 100 } }
 
                   activeFocusOnTab: true
+                  Accessible.name: roomColumn.modelData.name + " lights toggle"
+                  Accessible.description: roomColumn.modelData.lightCount + " lights, currently " + (roomColumn.modelData.on ? "on" : "off")
                   Keys.onReturnPressed: root.toggleRoom(roomColumn.modelData.id, !roomColumn.modelData.on)
                   Keys.onEnterPressed: root.toggleRoom(roomColumn.modelData.id, !roomColumn.modelData.on)
                   Keys.onSpacePressed: root.toggleRoom(roomColumn.modelData.id, !roomColumn.modelData.on)
@@ -838,6 +982,32 @@ Panel {
                     accent: Color.accent
                     interactive: true
                     onToggled: root.toggleRoom(roomColumn.modelData.id, !roomColumn.modelData.on)
+                  }
+
+                  Rectangle {
+                    id: favoriteButton
+                    anchors.right: discButton.left
+                    anchors.rightMargin: Style.spacing.rowPaddingX
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: Style.space(22)
+                    height: Style.space(22)
+                    color: "transparent"
+                    Accessible.role: Accessible.Button
+                    Accessible.name: (root.favoriteRooms[roomColumn.modelData.id] === true ? "Remove " : "Add ") + roomColumn.modelData.name + " favorite"
+                    activeFocusOnTab: true
+                    Keys.onReturnPressed: root.toggleFavorite(roomColumn.modelData.id)
+                    Keys.onSpacePressed: root.toggleFavorite(roomColumn.modelData.id)
+                    Text {
+                      anchors.centerIn: parent
+                      text: root.favoriteRooms[roomColumn.modelData.id] === true ? "★" : "☆"
+                      color: root.favoriteRooms[roomColumn.modelData.id] === true ? Color.accent : root.bar.foreground
+                      font.pixelSize: Style.font.body
+                    }
+                    MouseArea {
+                      anchors.fill: parent
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.toggleFavorite(roomColumn.modelData.id)
+                    }
                   }
 
                   Rectangle {
@@ -878,10 +1048,11 @@ Panel {
                   Text {
                     anchors.left: parent.left
                     anchors.leftMargin: parent.borderLeft + Style.spacing.rowPaddingX
-                    anchors.right: discButton.left
+                    anchors.right: favoriteButton.left
                     anchors.rightMargin: Style.spacing.rowPaddingX
                     anchors.verticalCenter: parent.verticalCenter
                     text: roomColumn.modelData.name + " (" + roomColumn.modelData.lightCount + ")"
+                    Accessible.name: roomColumn.modelData.name + ", " + roomColumn.modelData.lightCount + " lights, " + (roomColumn.modelData.on ? "on" : "off")
                     textFormat: Text.PlainText
                     color: root.bar.foreground
                     font.family: root.bar.fontFamily
@@ -962,6 +1133,35 @@ Panel {
                       actionProc.command = HueApi.apiCmd(["write-scene-config", JSON.stringify(ss)])
                       actionProc.running = true
                     }
+                  }
+                }
+
+                BorderSurface {
+                  visible: roomColumn.lightsOpen && root.roomSyncOn(roomColumn.modelData.id) && root.currentThemeName !== ""
+                  width: parent.width
+                  height: Style.space(42)
+                  radius: Style.cornerRadius
+                  color: Style.controlFill(activeFocus, previewMouse.containsMouse, root.bar.foreground, Color.accent)
+                  borderSpec: Border.controlSpec(activeFocus ? "focus" : (previewMouse.containsMouse ? "hover-cursor" : "normal"), root.bar.foreground, Color.accent)
+                  activeFocusOnTab: true
+                  Accessible.role: Accessible.Button
+                  Accessible.name: "Preview current theme " + root.currentThemeName + " in " + roomColumn.modelData.name
+                  Keys.onReturnPressed: root.runAction(HueApi.apiCmd(["sync-room", roomColumn.modelData.id]))
+                  Keys.onEnterPressed: root.runAction(HueApi.apiCmd(["sync-room", roomColumn.modelData.id]))
+                  Keys.onSpacePressed: root.runAction(HueApi.apiCmd(["sync-room", roomColumn.modelData.id]))
+                  Text {
+                    anchors.centerIn: parent
+                    text: "Preview theme: " + root.currentThemeName
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.body
+                  }
+                  MouseArea {
+                    id: previewMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.runAction(HueApi.apiCmd(["sync-room", roomColumn.modelData.id]))
                   }
                 }
 
@@ -1048,6 +1248,8 @@ Panel {
                         borderSpec: Border.controlSpec(sceneActive ? "focus" : (activeFocus ? "focus" : (hot ? "hover-cursor" : "normal")), Qt.darker(root.bar.foreground, 1.2), Color.accent)
 
                         activeFocusOnTab: true
+                        Accessible.role: Accessible.Button
+                        Accessible.name: (sceneActive ? "Active scene " : "Apply scene ") + modelData + " for " + roomColumn.modelData.name
                         Keys.onReturnPressed: root.applyScene(roomColumn.modelData.id, modelData)
                         Keys.onEnterPressed: root.applyScene(roomColumn.modelData.id, modelData)
                         Keys.onSpacePressed: root.applyScene(roomColumn.modelData.id, modelData)
@@ -1090,7 +1292,8 @@ Panel {
 
                     InlineToggle {
                       width: parent.width
-                      label: modelData.name
+                      label: modelData.name + (modelData.reachable === false ? " · unreachable" : "")
+                      Accessible.name: modelData.name + " light toggle, " + (modelData.on ? "on" : "off") + (modelData.reachable === false ? ", unreachable" : "")
                       titleSize: Style.font.body
                       rowColor: HueApi.lightColor(modelData)
                       checked: modelData.on

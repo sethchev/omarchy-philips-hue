@@ -44,6 +44,9 @@ def main(argv: list[str]) -> int:
     if operation == "write-scene-config" and len(argv) >= 3:
         _config_map("sceneRooms", argv[2])
         return 0
+    if operation == "write-favorite-config" and len(argv) >= 3:
+        _config_map("favoriteRooms", argv[2])
+        return 0
     if operation == "migrate-api" and len(argv) >= 3:
         version = migrate_api(argv[2])
         print("Hue API set to %s; existing application key verified." % version)
