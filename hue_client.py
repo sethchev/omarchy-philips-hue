@@ -9,6 +9,7 @@ import os
 import re
 import socket
 import ssl
+import stat
 import time
 import urllib.error
 import urllib.request
@@ -20,6 +21,9 @@ CREDS_FILE = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")
 CONFIG_FILE = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "omarchy/settings/hue-theme.json"
 COLORS_FILE = Path.home() / ".local/state/omarchy/current/theme/colors.toml"
 LOG_FILE = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "omarchy/hue-theme-hook.log"
+
+_MAX_LOCAL_READ = 1_048_576  # 1 MiB
+_MAX_RESPONSE_BYTES = 16_777_216  # 16 MiB
 
 _SAFE_ID = re.compile(r"^[0-9A-Za-z_-]{1,64}$")
 _UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F-]{27,36}$")
@@ -59,11 +63,32 @@ class _BridgeResolver:
         socket.getaddrinfo = self.original
 
 
+def _read_text_limited(path: Path, limit: int = _MAX_LOCAL_READ) -> str:
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return ""
+            data = os.read(fd, limit)
+            return data.decode("utf-8", "replace")
+        finally:
+            os.close(fd)
+    except OSError:
+        return ""
+
+
 def read_json(path: Path, default=None):
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-        with os.fdopen(fd) as handle:
-            return json.load(handle)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return default
+            data = os.read(fd, _MAX_LOCAL_READ)
+            if not data:
+                return default
+            return json.loads(data.decode("utf-8", "replace"))
+        finally:
+            os.close(fd)
     except (OSError, ValueError, TypeError):
         return default
 
@@ -85,6 +110,13 @@ def write_json_secure(path: Path, value) -> None:
             temporary.unlink()
         except FileNotFoundError:
             pass
+
+
+def _json_load_response(response, limit: int = _MAX_RESPONSE_BYTES):
+    data = response.read(limit + 1)
+    if len(data) > limit:
+        raise HueError("Response exceeds maximum allowed size")
+    return json.loads(data.decode("utf-8", "replace"))
 
 
 def configured_api_version(creds: dict) -> str:
@@ -215,10 +247,10 @@ class HueClient:
             if certificate_hostname:
                 with _BridgeResolver(certificate_hostname, self.bridge_ip):
                     with opener.open(request, timeout=5) as response:
-                        result = json.load(response)
+                        result = _json_load_response(response)
             else:
                 with opener.open(request, timeout=5) as response:
-                    result = json.load(response)
+                    result = _json_load_response(response)
         except (OSError, ValueError, urllib.error.URLError) as error:
             raise HueError("Bridge request failed: %s" % type(error).__name__) from error
         self._check_response(result)
@@ -580,7 +612,7 @@ def fetch_bridge_id(ip: str) -> str:
     opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=context))
     try:
         with opener.open("https://%s/api/config" % ip, timeout=5) as response:
-            value = str(json.load(response).get("bridgeid") or "").lower()
+            value = str(_json_load_response(response).get("bridgeid") or "").lower()
     except (OSError, ValueError, urllib.error.URLError) as error:
         raise HueError("Could not read bridge ID") from error
     if not re.fullmatch(r"[0-9a-f]{16}", value):
@@ -611,27 +643,21 @@ def _hex_to_hs(value: str) -> tuple[int, int]:
 
 
 def accent_color() -> str | None:
-    try:
-        for line in COLORS_FILE.read_text().splitlines():
-            match = re.match(r'^\s*accent\s*=\s*["\']?#([0-9a-fA-F]{6})["\']?\s*$', line)
-            if match:
-                return match.group(1).lower()
-    except OSError:
-        pass
+    for line in _read_text_limited(COLORS_FILE).splitlines():
+        match = re.match(r'^\s*accent\s*=\s*["\']?#([0-9a-fA-F]{6})["\']?\s*$', line)
+        if match:
+            return match.group(1).lower()
     return None
 
 
 def build_scene_palette(anchor: str) -> list[str]:
     named = {"red", "green", "yellow", "blue", "magenta", "cyan", "bright_red", "bright_green", "bright_yellow", "bright_blue", "bright_magenta", "bright_cyan"}
     order, values = [], {}
-    try:
-        for line in COLORS_FILE.read_text().splitlines():
-            match = re.match(r'^\s*([A-Za-z0-9_]+)\s*=\s*"#([0-9a-fA-F]{6})"\s*$', line)
-            if match:
-                order.append(match.group(1))
-                values[match.group(1)] = match.group(2).lower()
-    except OSError:
-        return []
+    for line in _read_text_limited(COLORS_FILE).splitlines():
+        match = re.match(r'^\s*([A-Za-z0-9_]+)\s*=\s*"#([0-9a-fA-F]{6})"\s*$', line)
+        if match:
+            order.append(match.group(1))
+            values[match.group(1)] = match.group(2).lower()
 
     def skipped(key):
         return key in ("selection", "muted") or any(part in key for part in ("background", "foreground", "border", "tab"))
@@ -650,12 +676,22 @@ def build_scene_palette(anchor: str) -> list[str]:
 def secure_log(message: str):
     LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
     try:
-        fd = os.open(LOG_FILE, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+        fd = os.open(LOG_FILE, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    except OSError:
+        return
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return
         with os.fdopen(fd, "a") as handle:
             os.fchmod(handle.fileno(), 0o600)
             handle.write("[%s] %s\n" % (time.strftime("%F %T"), message))
     except OSError:
         pass
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 def _theme_targets(state: dict, cfg: dict, room_id: str | None = None) -> list[tuple[str, dict]]:

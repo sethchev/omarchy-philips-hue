@@ -75,7 +75,10 @@ discover_bridge_cloud() {
   ip=$(python3 - <<'PY' 2>/dev/null || true
 import json, urllib.request
 with urllib.request.urlopen("https://discovery.meethue.com/", timeout=5) as response:
-    data = json.load(response)
+    raw = response.read(1048577)
+    if len(raw) > 1048576:
+        raise SystemExit(1)
+    data = json.loads(raw.decode("utf-8", "replace"))
 for item in data if isinstance(data, list) else []:
     ip = item.get("internalipaddress", "") if isinstance(item, dict) else ""
     if ip:
@@ -97,7 +100,10 @@ ctx = ssl.create_default_context(cafile=cacert)
 ctx.check_hostname = False
 try:
     with urllib.request.urlopen("https://%s/api/config" % target, timeout=5, context=ctx) as r:
-        d = json.load(r)
+        raw = r.read(1048577)
+        if len(raw) > 1048576:
+            raise SystemExit(1)
+        d = json.loads(raw.decode("utf-8", "replace"))
         bid = d.get("bridgeid", "")
         bid = bid.lower() if bid else ""
         if all(c in "0123456789abcdef" for c in bid) and len(bid) == 16:
@@ -128,7 +134,10 @@ request = urllib.request.Request(
     "https://%s/clip/v2/resource/bridge" % hostname,
     headers={"hue-application-key": key, "Accept": "application/json"})
 with urllib.request.urlopen(request, timeout=5, context=context) as response:
-    result = json.load(response)
+    raw = response.read(1048577)
+    if len(raw) > 1048576:
+        raise SystemExit(1)
+    result = json.loads(raw.decode("utf-8", "replace"))
 if result.get("errors") or not isinstance(result.get("data"), list):
     raise SystemExit(1)
 PY
@@ -157,7 +166,10 @@ request = urllib.request.Request(
     method="POST",
 )
 with urllib.request.urlopen(request, timeout=5, context=context) as response:
-    print(response.read().decode("utf-8", "replace"))
+    raw = response.read(1048577)
+    if len(raw) > 1048576:
+        raise SystemExit(1)
+    print(raw.decode("utf-8", "replace"))
 PY
     )
     ts=$(date +'%Y-%m-%d %H:%M:%S')
@@ -165,7 +177,10 @@ PY
     redacted=$(printf '%s' "${response:-<empty>}" | python3 -c "
 import json, sys
 try:
-    d = json.load(sys.stdin)
+    raw = sys.stdin.read(1048577)
+    if len(raw) > 1048576:
+        raise ValueError("too large")
+    d = json.loads(raw)
     for item in (d if isinstance(d, list) else [d]):
         if isinstance(item, dict) and 'success' in item:
             if 'username' in item['success']:
@@ -180,7 +195,10 @@ except Exception:
     username=$(python3 -c "
 import json, sys
 try:
-    d = json.load(sys.stdin)
+    raw = sys.stdin.read(1048577)
+    if len(raw) > 1048576:
+        raise ValueError("too large")
+    d = json.loads(raw)
     for item in d:
         if isinstance(item, dict) and 'success' in item and 'username' in item['success']:
             u = item['success']['username']
@@ -206,7 +224,21 @@ mkdir -p "$STATE_DIR" || {
 
 ensure_log_perms
 
-if [[ -f "$STATE_FILE" ]] && python3 -c "import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d.get('bridgeIp') else 1)" "$STATE_FILE" 2>/dev/null; then
+if [[ -f "$STATE_FILE" ]] && python3 -c "
+import json, os, stat, sys
+try:
+    fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        sys.exit(1)
+    raw = os.read(fd, 1048577)
+    os.close(fd)
+    if len(raw) > 1048576:
+        sys.exit(1)
+    d = json.loads(raw.decode('utf-8', 'replace'))
+    sys.exit(0 if d.get('bridgeIp') else 1)
+except Exception:
+    sys.exit(1)
+" "$STATE_FILE" 2>/dev/null; then
   info "Existing config found at $STATE_FILE."
   info "Re-pairing will replace the username stored by this plugin."
 fi
@@ -305,7 +337,7 @@ if [[ ! -f "$CACERT" ]]; then
 fi
 
 info "Verifying access..."
-light_count=$(python3 "$(dirname -- "${BASH_SOURCE[0]}")/hue-api.py" verify 2>/dev/null || true)
+light_count=$(timeout 15 python3 "$(dirname -- "${BASH_SOURCE[0]}")/hue-api.py" verify 2>/dev/null || true)
 if [[ -n "$light_count" ]]; then
   ok "Connected through Hue API $api_version. Found $light_count light(s)."
 else

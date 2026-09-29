@@ -11,5 +11,5 @@ HELPER="$PLUGIN_DIR/hue-api.py"
 command -v python3 >/dev/null 2>&1 || exit 0
 [[ -f "${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/settings/hue.json" ]] || exit 0
 
-python3 "$HELPER" theme-sync "$THEME_SLUG" >/dev/null 2>&1 || true
+timeout 30 python3 "$HELPER" theme-sync "$THEME_SLUG" >/dev/null 2>&1 || true
 exit 0
