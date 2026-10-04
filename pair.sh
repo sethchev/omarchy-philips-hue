@@ -179,7 +179,7 @@ import json, sys
 try:
     raw = sys.stdin.read(1048577)
     if len(raw) > 1048576:
-        raise ValueError("too large")
+        raise ValueError('too large')
     d = json.loads(raw)
     for item in (d if isinstance(d, list) else [d]):
         if isinstance(item, dict) and 'success' in item:
@@ -197,7 +197,7 @@ import json, sys
 try:
     raw = sys.stdin.read(1048577)
     if len(raw) > 1048576:
-        raise ValueError("too large")
+        raise ValueError('too large')
     d = json.loads(raw)
     for item in d:
         if isinstance(item, dict) and 'success' in item and 'username' in item['success']:
