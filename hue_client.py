@@ -15,6 +15,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from hue_transport import no_redirect_opener
+
 PLUGIN_DIR = Path(__file__).resolve().parent
 CACERT = PLUGIN_DIR / "hue_bridge_cacert.pem"
 CREDS_FILE = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "omarchy/settings/hue.json"
@@ -229,7 +231,7 @@ class HueClient:
         if not self._opener or self._opener[0] != key:
             context = ssl.create_default_context(cafile=str(CACERT))
             context.check_hostname = verify_hostname
-            self._opener = (key, urllib.request.build_opener(urllib.request.HTTPSHandler(context=context)))
+            self._opener = (key, no_redirect_opener(context))
         return self._opener[1]
 
     def _request(self, method: str, path: str, body=None):
@@ -654,7 +656,7 @@ class HueClient:
 def fetch_bridge_id(ip: str) -> str:
     context = ssl.create_default_context(cafile=str(CACERT))
     context.check_hostname = False
-    opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=context))
+    opener = no_redirect_opener(context)
     try:
         with opener.open("https://%s/api/config" % ip, timeout=5) as response:
             value = str(_json_load_response(response).get("bridgeid") or "").lower()
