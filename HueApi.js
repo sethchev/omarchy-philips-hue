@@ -35,6 +35,7 @@ function parseConfig(text) {
 }
 
 function parseJsonObject(text) {
+  if (isObject(text)) return text
   var raw = String(text || "").trim()
   if (!raw) return null
   try {
@@ -76,12 +77,46 @@ function parseLights(text) {
       hasColor: hasColor,
       colormode: String(state.colormode || ""),
       xy: hasXy ? [Number(state.xy[0]), Number(state.xy[1])] : [],
-      gamut: light.gamut || {},
-      pickerOpen: false
+      gamut: light.gamut || {}
     })
   }
   lights.sort(function(a, b) { return a.name.localeCompare(b.name) })
   return lights
+}
+
+function isObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+}
+
+function parseSnapshot(text) {
+  try {
+    var raw = JSON.parse(text)
+    if (!isObject(raw) || !isObject(raw.lights) || !isObject(raw.groups) || !isObject(raw.scenes)) return null
+    if (raw.allControlId !== undefined && raw.allControlId !== "" && !isValidId(raw.allControlId)) return null
+    var numericKeys = ["bri", "ct", "hue", "sat"]
+    for (var id in raw.lights) {
+      var light = raw.lights[id]
+      if (!isValidId(id) || !isObject(light) || !isObject(light.state) || typeof light.state.on !== "boolean") return null
+      var state = light.state
+      for (var i = 0; i < numericKeys.length; i++) {
+        var key = numericKeys[i]
+        if (state[key] !== undefined && (typeof state[key] !== "number" || !isFinite(state[key]))) return null
+      }
+    }
+    for (var groupId in raw.groups) {
+      var group = raw.groups[groupId]
+      if (!isValidId(groupId) || !isObject(group) || !Array.isArray(group.lights) || !isObject(group.state)) return null
+    }
+    for (var sceneId in raw.scenes) {
+      if (!isValidId(sceneId) || !isObject(raw.scenes[sceneId])) return null
+    }
+    var lights = parseLights(raw.lights)
+    var byId = {}
+    for (var index = 0; index < lights.length; index++) byId[lights[index].id] = lights[index]
+    return { lightsById: byId, rooms: parseGroups(raw.groups), scenes: parseScenes(raw.scenes), allControlId: String(raw.allControlId || "") }
+  } catch (error) {
+    return null
+  }
 }
 
 function parseGroups(text) {

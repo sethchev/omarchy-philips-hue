@@ -67,7 +67,7 @@ def main(argv: list[str]) -> int:
         applied, total = client.apply_prebuilt_scene(argv[2], room_id)
         print("Applied scene to %d/%d room(s)." % (applied, total))
     elif operation == "get-state":
-        print(json.dumps(client.get_state()))
+        print(json.dumps(client.get_snapshot()))
     elif operation == "get-lights":
         print(json.dumps(client.get_lights()))
     elif operation == "get-groups":
@@ -76,6 +76,8 @@ def main(argv: list[str]) -> int:
         client.put_light(argv[2], json.loads(argv[3]))
     elif operation == "put-group" and len(argv) >= 4:
         client.put_group(argv[2], json.loads(argv[3]))
+    elif operation == "put-all" and len(argv) >= 4:
+        client.put_all(json.loads(argv[2]), json.loads(argv[3]))
     elif operation == "verify":
         print(client.verify())
     else:

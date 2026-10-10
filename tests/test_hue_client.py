@@ -79,6 +79,79 @@ class HueClientTests(unittest.TestCase):
     def test_missing_api_version_remains_v1(self):
         self.assertEqual(hue_client.configured_api_version({}), "v1")
 
+    def test_v2_snapshot_reads_resources_once_including_scenes_and_connectivity(self):
+        client = hue_client.HueClient(self.creds())
+        scene = {
+            "type": "scene", "id": "55555555-5555-4555-8555-555555555555",
+            "metadata": {"name": "Read"},
+            "group": {"rid": V2_RESOURCES[1]["id"], "rtype": "room"},
+            "status": {"active": "static"},
+        }
+        connectivity = {
+            "type": "zigbee_connectivity", "status": "disconnected",
+            "owner": V2_RESOURCES[0]["owner"],
+        }
+        client._v2_data = mock.Mock(return_value=V2_RESOURCES + [scene, connectivity])
+        state = client.get_snapshot()
+        client._v2_data.assert_called_once_with()
+        self.assertFalse(state["lights"]["7"]["state"]["reachable"])
+        self.assertEqual(state["groups"]["4"]["lights"], ["7"])
+        self.assertTrue(state["scenes"][scene["id"]]["active"])
+
+    def test_v2_light_fetch_joins_device_connectivity(self):
+        client = hue_client.HueClient(self.creds())
+        for status, reachable in (("connected", True), ("disconnected", False), ("connectivity_issue", False)):
+            with self.subTest(status=status):
+                client._v2_data = mock.Mock(return_value=V2_RESOURCES + [{
+                    "type": "zigbee_connectivity", "status": status,
+                    "owner": V2_RESOURCES[0]["owner"],
+                }])
+                self.assertEqual(client.get_lights()["7"]["state"]["reachable"], reachable)
+                client._v2_data.assert_called_once_with()
+
+    def test_v1_snapshot_does_not_repeat_group_reads(self):
+        client = hue_client.HueClient(self.creds("v1"))
+        responses = {
+            "/lights": {"7": {"state": {"on": True}}},
+            "/groups": {"4": {"type": "Room", "lights": ["7"], "state": {"any_on": True}, "action": {"scene": "abc"}}},
+            "/scenes": {"abc": {"group": "4", "name": "Read"}},
+        }
+        client._request = mock.Mock(side_effect=lambda _method, path: responses[path])
+        state = client.get_snapshot()
+        self.assertEqual(client._request.call_args_list, [mock.call("GET", path) for path in responses])
+        self.assertTrue(state["scenes"]["abc"]["active"])
+        self.assertEqual(state["allControlId"], "0")
+
+    def test_v2_snapshot_exposes_bridge_wide_group_service(self):
+        client = hue_client.HueClient(self.creds())
+        control_id = "66666666-6666-4666-8666-666666666666"
+        client._v2_data = mock.Mock(return_value=V2_RESOURCES + [{
+            "type": "grouped_light", "id": control_id,
+            "owner": {"rid": "77777777-7777-4777-8777-777777777777", "rtype": "bridge_home"},
+        }])
+        self.assertEqual(client.get_snapshot()["allControlId"], control_id)
+
+    def test_snapshot_failure_does_not_return_partial_results(self):
+        client = hue_client.HueClient(self.creds("v1"))
+        client._request = mock.Mock(side_effect=[{}, {}, hue_client.HueError("Unauthorized")])
+        with self.assertRaises(hue_client.HueError):
+            client.get_snapshot()
+
+    def test_master_write_deduplicates_ids_and_continues_after_failure(self):
+        client = hue_client.HueClient(self.creds("v1"))
+        client.put_light = mock.Mock(side_effect=[hue_client.HueError("Unreachable"), None])
+        with self.assertRaisesRegex(hue_client.HueError, "1/2 lights"):
+            client.put_all(["7", "7", "8"], {"on": False})
+        self.assertEqual(client.put_light.call_args_list, [
+            mock.call("7", {"on": False}), mock.call("8", {"on": False})])
+
+    def test_master_write_validates_all_ids_before_writing(self):
+        client = hue_client.HueClient(self.creds("v1"))
+        client.put_light = mock.Mock()
+        with self.assertRaises(hue_client.HueError):
+            client.put_all(["7", "../../invalid"], {"on": True})
+        client.put_light.assert_not_called()
+
     def test_v1_normalization_exposes_capabilities_for_shared_model(self):
         client = hue_client.HueClient(self.creds("v1"))
         lights = client._normalize_v1_lights({

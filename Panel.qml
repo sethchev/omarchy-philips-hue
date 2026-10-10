@@ -17,6 +17,7 @@ Panel {
   property var config: null
   property string currentThemeName: ""
   property var lightsById: ({})
+  property string allControlId: ""
   property var rooms: []
   property var scenes: []
   property var roomsWithLights: []
@@ -30,10 +31,15 @@ Panel {
   property string lastSuccessfulFetch: ""
   property var favoriteRooms: ({})
   property var actionQueue: []
+  property var currentAction: null
+  property int stateRevision: 0
+  property string actionError: ""
+  property var pickerOpenById: ({})
   property var expandedRooms: ({})
   property var expandedSceneMenus: ({})
   property string sceneStatus: ""
   property string sceneStatusRoomId: ""
+  property int sceneActionId: 0
   readonly property var prebuiltScenes: ["Relax", "Read", "Natural Light", "Tv Mode"]
 
   readonly property int roomCount: root.roomsWithLights.length
@@ -57,12 +63,8 @@ Panel {
   }
 
   function computeAllLightsOn() {
-    if (root.lightedRoomCount === 0) return false
-    var rooms = root.lightedRooms()
-    for (var i = 0; i < rooms.length; i++) {
-      if (!rooms[i].on) return false
-    }
-    return true
+    var ids = Object.keys(root.lightsById)
+    return ids.length > 0 && ids.every(function(id) { return root.lightsById[id].on })
   }
 
   function lightedRooms() {
@@ -94,24 +96,13 @@ Panel {
   }
 
   function lightsTotal() {
-    var total = 0
-    for (var i = 0; i < root.roomsWithLights.length; i++) {
-      total += root.roomsWithLights[i].lightCount
-    }
-    return total + root.orphanLights.length
+    return Object.keys(root.lightsById).length
   }
 
   function unreachableLightCount() {
-    var count = 0
-    for (var i = 0; i < root.roomsWithLights.length; i++) {
-      for (var j = 0; j < root.roomsWithLights[i].lights.length; j++) {
-        if (root.roomsWithLights[i].lights[j].reachable === false) count++
-      }
-    }
-    for (var k = 0; k < root.orphanLights.length; k++) {
-      if (root.orphanLights[k].reachable === false) count++
-    }
-    return count
+    return Object.keys(root.lightsById).filter(function(id) {
+      return root.lightsById[id].reachable === false
+    }).length
   }
 
   function open() {
@@ -133,7 +124,7 @@ Panel {
       configFile.reload()
       return
     }
-    if (root.pendingFetches > 0 || root.fetchScheduled) {
+    if (root.pendingFetches > 0 || root.fetchScheduled || root.currentAction || root.actionQueue.length > 0) {
       root.refreshRequested = true
       return
     }
@@ -145,15 +136,14 @@ Panel {
   function startFetches() {
     root.fetchScheduled = false
     if (!root.config) return
-    if (root.pendingFetches > 0) {
+    if (root.pendingFetches > 0 || root.currentAction || root.actionQueue.length > 0) {
       root.refreshRequested = true
       return
     }
-    root.lastFetchFailed = false
-    root.pendingFetches = 3
-    prepareFetch(lightsProc, ["get-lights"])
-    prepareFetch(groupsProc, ["get-groups"])
-    prepareFetch(scenesProc, ["get-scenes"])
+    root.refreshRequested = false
+    root.pendingFetches = 1
+    stateProc.fetchRevision = root.stateRevision
+    prepareFetch(stateProc, ["get-state"])
   }
 
   function prepareFetch(proc, args) {
@@ -169,47 +159,36 @@ Panel {
   function tryCompleteFetch(proc) {
     if (proc.fetchReported || !proc.fetchOutputFinished || !proc.fetchExited) return
     proc.fetchReported = true
-    var success = proc.fetchExitCode === 0
-    if (success) {
-      try {
-        var parsed = JSON.parse(proc.fetchOutput)
-        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) success = false
-        else if (proc.fetchKind === "lights") {
-          var lights = HueApi.parseLights(proc.fetchOutput)
-          var byId = {}
-          for (var i = 0; i < lights.length; i++) byId[lights[i].id] = lights[i]
-          root.lightsById = byId
-        } else if (proc.fetchKind === "groups") {
-          root.rooms = HueApi.parseGroups(proc.fetchOutput)
-        } else if (proc.fetchKind === "scenes") {
-          root.scenes = HueApi.parseScenes(proc.fetchOutput)
-        }
-      } catch (error) {
-        success = false
-      }
+    // A command or credential change during the read invalidates this snapshot.
+    if (proc.fetchRevision !== root.stateRevision || !root.config) {
+      root.pendingFetches = 0
+      root.loading = false
+      if (root.config) root.refresh()
+      return
     }
-    root.finishFetch(success)
+    var snapshot = proc.fetchExitCode === 0 ? HueApi.parseSnapshot(proc.fetchOutput) : null
+    if (snapshot) {
+      root.lightsById = snapshot.lightsById
+      root.rooms = snapshot.rooms
+      root.scenes = snapshot.scenes
+      root.allControlId = snapshot.allControlId
+      root.assembleRooms()
+    }
+    root.finishFetch(snapshot !== null)
   }
 
   function finishFetch(success) {
-    if (root.pendingFetches <= 0) return
-    root.pendingFetches--
-    if (success === false) root.lastFetchFailed = true
-    if (root.pendingFetches === 0) {
-      root.loading = false
-      if (root.lastFetchFailed) root.consecutiveFetchFailures++
-      else {
-        root.consecutiveFetchFailures = 0
-        root.lastSuccessfulFetch = new Date().toLocaleTimeString()
-      }
-      root.assembleRooms()
-      if (root.refreshRequested) {
-        root.refreshRequested = false
-        root.refresh()
-      } else if (root.opened) {
-        pollTimer.restart()
-      }
-    }
+    root.pendingFetches = 0
+    root.loading = false
+    root.lastFetchFailed = !success
+    if (success) {
+      root.consecutiveFetchFailures = 0
+      root.lastSuccessfulFetch = new Date().toLocaleTimeString()
+    } else root.consecutiveFetchFailures++
+    if (root.refreshRequested) {
+      root.refreshRequested = false
+      root.refresh()
+    } else if (root.opened) pollTimer.restart()
   }
 
   function assembleRooms() {
@@ -224,7 +203,7 @@ Panel {
         apiId: room.apiId,
         controlId: room.controlId,
         name: room.name,
-        on: room.on,
+        on: lights.length > 0 ? lights.some(function(light) { return light.on }) : room.on,
         lightCount: lights.length,
         lights: lights
       })
@@ -238,48 +217,22 @@ Panel {
   }
 
   function lightClone(light, changes) {
-    return {
-      id: light.id,
-      apiId: light.apiId,
-      name: light.name,
-      on: changes.on !== undefined ? changes.on : light.on,
-      bri: changes.bri !== undefined ? changes.bri : light.bri,
-      hasBri: light.hasBri,
-      ct: changes.ct !== undefined ? changes.ct : light.ct,
-      hasCt: light.hasCt,
-      ctMin: light.ctMin,
-      ctMax: light.ctMax,
-      hue: changes.hue !== undefined ? changes.hue : light.hue,
-      sat: changes.sat !== undefined ? changes.sat : light.sat,
-      hasColor: light.hasColor,
-      colormode: light.colormode,
-      xy: light.xy ? light.xy.slice() : [],
-      gamut: light.gamut || {},
-      pickerOpen: changes.pickerOpen !== undefined ? changes.pickerOpen : light.pickerOpen
-    }
-  }
-
-  function lightCopy(light, on) {
-    return root.lightClone(light, { on: on })
+    var result = {}
+    for (var key in light) result[key] = light[key]
+    for (var changed in changes) result[changed] = changes[changed]
+    return result
   }
 
   function setRoomOn(roomId, on) {
-    var newRooms = []
-    for (var i = 0; i < root.roomsWithLights.length; i++) {
-      var room = root.roomsWithLights[i]
-      newRooms.push({
-        id: room.id,
-        apiId: room.apiId,
-        controlId: room.controlId,
-        name: room.name,
-        on: room.id === roomId ? on : room.on,
-        lightCount: room.lightCount,
-        lights: room.id === roomId
-          ? room.lights.map(function(light) { return root.lightCopy(light, on) })
-          : room.lights
-      })
+    var room = root.roomById(roomId)
+    if (!room) return
+    var byId = root.lightClone(root.lightsById, {})
+    for (var i = 0; i < room.lights.length; i++) {
+      var id = room.lights[i].id
+      byId[id] = root.lightClone(byId[id], { on: on })
     }
-    root.roomsWithLights = newRooms
+    root.lightsById = byId
+    root.assembleRooms()
   }
 
   function roomHasBrightness(room) {
@@ -305,66 +258,26 @@ Panel {
     var target = root.roomById(roomId)
     if (!target || !target.controlId) return
     var clamped = Math.max(1, Math.min(254, Math.round(bri)))
-    root.roomsWithLights = root.roomsWithLights.map(function(room) {
-      if (room.id !== roomId) return room
-      return {
-        id: room.id,
-        apiId: room.apiId,
-        controlId: room.controlId,
-        name: room.name,
-        on: room.on,
-        lightCount: room.lightCount,
-        lights: room.lights.map(function(light) {
-          return light.hasBri ? root.lightClone(light, { bri: clamped }) : light
-        })
-      }
-    })
+    var byId = root.lightClone(root.lightsById, {})
+    for (var i = 0; i < target.lights.length; i++) {
+      var light = target.lights[i]
+      if (light.hasBri) byId[light.id] = root.lightClone(light, { bri: clamped })
+    }
+    root.lightsById = byId
+    root.assembleRooms()
     root.runAction(HueApi.apiCmd(["put-group", target.controlId, JSON.stringify({ bri: clamped })]))
-    root.scheduleRefresh()
   }
 
   function setLightOn(lightId, on) {
-    var newRooms = []
-    for (var i = 0; i < root.roomsWithLights.length; i++) {
-      var room = root.roomsWithLights[i]
-      newRooms.push({
-        id: room.id,
-        apiId: room.apiId,
-        controlId: room.controlId,
-        name: room.name,
-        on: room.on,
-        lightCount: room.lightCount,
-        lights: room.lights.map(function(light) {
-          return light.id === lightId ? root.lightCopy(light, on) : light
-        })
-      })
-    }
-    root.roomsWithLights = newRooms
-    root.orphanLights = root.orphanLights.map(function(light) {
-      return light.id === lightId ? root.lightCopy(light, on) : light
-    })
+    root.patchLights(lightId, { on: on })
   }
 
   function patchLights(lightId, changes) {
-    var newRooms = []
-    for (var i = 0; i < root.roomsWithLights.length; i++) {
-      var room = root.roomsWithLights[i]
-      newRooms.push({
-        id: room.id,
-        apiId: room.apiId,
-        controlId: room.controlId,
-        name: room.name,
-        on: room.on,
-        lightCount: room.lightCount,
-        lights: room.lights.map(function(light) {
-          return light.id === lightId ? root.lightClone(light, changes) : light
-        })
-      })
-    }
-    root.roomsWithLights = newRooms
-    root.orphanLights = root.orphanLights.map(function(light) {
-      return light.id === lightId ? root.lightClone(light, changes) : light
-    })
+    if (!root.lightsById[lightId]) return
+    var byId = root.lightClone(root.lightsById, {})
+    byId[lightId] = root.lightClone(byId[lightId], changes)
+    root.lightsById = byId
+    root.assembleRooms()
   }
 
   function setLightBri(lightId, bri) {
@@ -380,16 +293,7 @@ Panel {
   }
 
   function lightById(lightId) {
-    for (var i = 0; i < root.roomsWithLights.length; i++) {
-      var room = root.roomsWithLights[i]
-      for (var j = 0; j < room.lights.length; j++) {
-        if (room.lights[j].id === lightId) return room.lights[j]
-      }
-    }
-    for (var k = 0; k < root.orphanLights.length; k++) {
-      if (root.orphanLights[k].id === lightId) return root.orphanLights[k]
-    }
-    return null
+    return root.lightsById[lightId] || null
   }
 
   function roomById(roomId) {
@@ -446,16 +350,18 @@ Panel {
 
   function applyScene(roomId, sceneName) {
     if (!root.config) return
+    sceneStatusTimer.stop()
     root.sceneStatusRoomId = roomId
     root.sceneStatus = "Applying " + sceneName + "…"
-    root.runAction(HueApi.apiCmd(["apply-scene", sceneName, roomId]))
-    root.scheduleRefresh()
-    sceneStatusTimer.restart()
+    root.sceneActionId = root.runAction(HueApi.apiCmd(["apply-scene", sceneName, roomId]), {
+      roomId: roomId, sceneName: sceneName
+    })
   }
 
   function toggleColorPicker(lightId) {
-    var light = root.lightById(lightId)
-    if (light) root.patchLights(lightId, { pickerOpen: !light.pickerOpen })
+    var map = root.lightClone(root.pickerOpenById, {})
+    map[lightId] = map[lightId] !== true
+    root.pickerOpenById = map
   }
 
   function toggleRoom(roomId, on) {
@@ -464,7 +370,6 @@ Panel {
     if (!room || !room.controlId) return
     root.setRoomOn(roomId, on)
     root.runAction(HueApi.apiCmd(["put-group", room.controlId, JSON.stringify({ on: on })]))
-    root.scheduleRefresh()
   }
 
   function toggleLight(lightId, on) {
@@ -473,7 +378,6 @@ Panel {
     if (!light) return
     root.setLightOn(lightId, on)
     root.runAction(HueApi.apiCmd(["put-light", light.apiId, JSON.stringify({ on: on })]))
-    root.scheduleRefresh()
   }
 
   function setBrightness(lightId, bri) {
@@ -483,7 +387,6 @@ Panel {
     var clamped = Math.max(1, Math.min(254, Math.round(bri)))
     root.setLightBri(lightId, clamped)
     root.runAction(HueApi.apiCmd(["put-light", light.apiId, JSON.stringify({ bri: clamped })]))
-    root.scheduleRefresh()
   }
 
   function setColorTemperature(lightId, ct) {
@@ -493,7 +396,6 @@ Panel {
     var clamped = Math.max(light.ctMin, Math.min(light.ctMax, Math.round(ct)))
     root.setLightCt(lightId, clamped)
     root.runAction(HueApi.apiCmd(["put-light", light.apiId, JSON.stringify({ ct: clamped })]))
-    root.scheduleRefresh()
   }
 
   function setLightColor(lightId, hue, sat) {
@@ -502,46 +404,64 @@ Panel {
     if (!light) return
     root.patchLightColor(lightId, hue, sat)
     root.runAction(HueApi.apiCmd(["put-light", light.apiId, JSON.stringify({ hue: hue, sat: sat })]))
-    root.scheduleRefresh()
   }
 
   function toggleAll(on) {
-    if (!root.config || root.lightedRoomCount === 0) return
-    var rooms = root.lightedRooms()
-    var body = JSON.stringify({ on: on })
-    for (var i = 0; i < rooms.length; i++) {
-      if (rooms[i].controlId) root.runAction(HueApi.apiCmd(["put-group", rooms[i].controlId, body]))
-    }
+    if (!root.config || root.lightTotal === 0) return
+    var ids = Object.keys(root.lightsById).map(function(id) { return root.lightsById[id].apiId })
     root.setAllOn(on)
-    root.scheduleRefresh()
+    var body = JSON.stringify({ on: on })
+    // The bridge-wide service covers orphans and avoids duplicate zone writes.
+    root.runAction(root.allControlId
+      ? HueApi.apiCmd(["put-group", root.allControlId, body])
+      : HueApi.apiCmd(["put-all", JSON.stringify(ids), body]))
   }
 
   function setAllOn(on) {
-    root.roomsWithLights = root.roomsWithLights.map(function(room) {
-      if (room.lightCount === 0) return room
-      return {
-        id: room.id,
-        apiId: room.apiId,
-        controlId: room.controlId,
-        name: room.name,
-        on: on,
-        lightCount: room.lightCount,
-        lights: room.lights.map(function(light) { return root.lightCopy(light, on) })
-      }
-    })
+    var byId = {}
+    for (var id in root.lightsById) byId[id] = root.lightClone(root.lightsById[id], { on: on })
+    root.lightsById = byId
+    root.assembleRooms()
   }
 
-  function runAction(command) {
-    root.actionQueue.push(command)
+  function runAction(command, context) {
+    root.stateRevision++
+    root.actionError = ""
+    var id = root.stateRevision
+    root.actionQueue.push({ id: id, command: command, context: context || {} })
     drainActionQueue()
+    return id
   }
 
   function drainActionQueue() {
-    if (actionProc.running) return
-    if (root.actionQueue.length === 0) return
-    var next = root.actionQueue.shift()
-    actionProc.command = next
+    if (root.currentAction) return
+    if (root.actionQueue.length === 0) {
+      root.scheduleRefresh()
+      return
+    }
+    root.currentAction = root.actionQueue.shift()
+    actionProc.errorOutput = ""
+    actionProc.actionOutputFinished = false
+    actionProc.actionExited = false
+    actionProc.actionExitCode = -1
+    actionProc.command = root.currentAction.command
     actionProc.running = true
+  }
+
+  function tryCompleteAction() {
+    if (!root.currentAction || !actionProc.actionExited || !actionProc.actionOutputFinished) return
+    var context = root.currentAction.context
+    var failed = actionProc.actionExitCode !== 0
+    if (failed) {
+      root.actionError = actionProc.errorOutput.trim() || "Hue command failed. Retrying state refresh."
+      themeConfigFile.reload()
+    }
+    if (context.sceneName && root.currentAction.id === root.sceneActionId) {
+      root.sceneStatus = failed ? "Could not apply " + context.sceneName : "Applied " + context.sceneName
+      sceneStatusTimer.restart()
+    }
+    root.currentAction = null
+    Qt.callLater(root.drainActionQueue)
   }
 
   function scheduleRefresh() {
@@ -554,13 +474,14 @@ Panel {
     printErrors: false
     onFileChanged: reload()
     onLoaded: {
+      root.stateRevision++
       root.config = HueApi.parseConfig(text())
       if (root.config) {
         root.config.username = ""
         root.refresh()
       }
     }
-    onLoadFailed: root.config = null
+    onLoadFailed: { root.stateRevision++; root.config = null }
   }
 
   property FileView themeNameFile: FileView {
@@ -639,8 +560,8 @@ Panel {
   }
 
   Process {
-    id: lightsProc
-    property string fetchKind: "lights"
+    id: stateProc
+    property int fetchRevision: 0
     property string fetchOutput: ""
     property bool fetchOutputFinished: false
     property int fetchExitCode: -1
@@ -649,69 +570,36 @@ Panel {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        lightsProc.fetchOutput = text
-        lightsProc.fetchOutputFinished = true
-        root.tryCompleteFetch(lightsProc)
+        stateProc.fetchOutput = text
+        stateProc.fetchOutputFinished = true
+        root.tryCompleteFetch(stateProc)
       }
     }
     onExited: function(exitCode) {
       fetchExitCode = exitCode
       fetchExited = true
-      root.tryCompleteFetch(lightsProc)
-    }
-  }
-
-  Process {
-    id: groupsProc
-    property string fetchKind: "groups"
-    property string fetchOutput: ""
-    property bool fetchOutputFinished: false
-    property int fetchExitCode: -1
-    property bool fetchExited: false
-    property bool fetchReported: false
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        groupsProc.fetchOutput = text
-        groupsProc.fetchOutputFinished = true
-        root.tryCompleteFetch(groupsProc)
-      }
-    }
-    onExited: function(exitCode) {
-      fetchExitCode = exitCode
-      fetchExited = true
-      root.tryCompleteFetch(groupsProc)
-    }
-  }
-
-  Process {
-    id: scenesProc
-    property string fetchKind: "scenes"
-    property string fetchOutput: ""
-    property bool fetchOutputFinished: false
-    property int fetchExitCode: -1
-    property bool fetchExited: false
-    property bool fetchReported: false
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        scenesProc.fetchOutput = text
-        scenesProc.fetchOutputFinished = true
-        root.tryCompleteFetch(scenesProc)
-      }
-    }
-    onExited: function(exitCode) {
-      fetchExitCode = exitCode
-      fetchExited = true
-      root.tryCompleteFetch(scenesProc)
+      root.tryCompleteFetch(stateProc)
     }
   }
 
   Process {
     id: actionProc
-    onExited: function(exitCode) {
-      root.scheduleRefresh()
-      root.drainActionQueue()
+    property string errorOutput: ""
+    property bool actionOutputFinished: false
+    property bool actionExited: false
+    property int actionExitCode: -1
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        actionProc.errorOutput = text
+        actionProc.actionOutputFinished = true
+        root.tryCompleteAction()
+      }
+    }
+    onExited: function(code) {
+      actionExitCode = code
+      actionExited = true
+      root.tryCompleteAction()
     }
   }
 
@@ -876,6 +764,17 @@ Panel {
             wrapMode: Text.WordWrap
           }
 
+          Text {
+            visible: root.actionError !== ""
+            width: parent.width
+            text: root.actionError
+            textFormat: Text.PlainText
+            color: Color.urgent
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+          }
+
           BorderSurface {
             visible: root.config !== null && root.lastFetchFailed
             width: parent.width
@@ -916,7 +815,7 @@ Panel {
           }
 
           InlineToggle {
-            visible: root.config !== null && root.lightedRoomCount > 0
+            visible: root.config !== null && root.lightTotal > 0
             width: parent.width
             label: "All lights"
             checked: root.allLightsOn
@@ -1110,8 +1009,7 @@ Panel {
                       var turningOn = ts[modelData.id] === false
                       ts[modelData.id] = turningOn
                       root.themeSync = ts
-                      actionProc.command = HueApi.apiCmd(["write-theme-config", JSON.stringify(ts)])
-                      actionProc.running = true
+                      root.runAction(HueApi.apiCmd(["write-theme-config", JSON.stringify(ts)]))
                       if (turningOn) {
                         root.runAction(HueApi.apiCmd(["sync-room", modelData.id]))
                       }
@@ -1130,8 +1028,7 @@ Panel {
                       var ss = JSON.parse(JSON.stringify(root.sceneRooms))
                       ss[modelData.id] = !root.roomSceneDefault(modelData.id)
                       root.sceneRooms = ss
-                      actionProc.command = HueApi.apiCmd(["write-scene-config", JSON.stringify(ss)])
-                      actionProc.running = true
+                      root.runAction(HueApi.apiCmd(["write-scene-config", JSON.stringify(ss)]))
                     }
                   }
                 }
@@ -1282,94 +1179,15 @@ Panel {
                 Repeater {
                   model: modelData.lights
 
-                  Column {
-                    id: roomLightRow
+                  LightControls {
                     required property var modelData
-                    readonly property bool themeSynced: root.roomSyncOn(roomColumn.modelData.id)
+                    light: modelData
+                    controller: root
+                    bar: root.bar
+                    themeSynced: root.roomSyncOn(roomColumn.modelData.id)
+                    pickerOpen: root.pickerOpenById[modelData.id] === true
                     visible: roomColumn.lightsOpen
                     width: parent.width
-                    spacing: Style.space(1)
-
-                    InlineToggle {
-                      width: parent.width
-                      label: modelData.name + (modelData.reachable === false ? " · unreachable" : "")
-                      Accessible.name: modelData.name + " light toggle, " + (modelData.on ? "on" : "off") + (modelData.reachable === false ? ", unreachable" : "")
-                      titleSize: Style.font.body
-                      rowColor: HueApi.lightColor(modelData)
-                      checked: modelData.on
-                      foreground: Qt.darker(root.bar.foreground, 1.2)
-                      accent: Color.accent
-                      fontFamily: root.bar.fontFamily
-                      onClicked: root.toggleLight(modelData.id, !modelData.on)
-                    }
-
-                    Row {
-                      visible: modelData.on && modelData.hasColor
-                      width: parent.width - Style.space(24)
-                      anchors.horizontalCenter: parent.horizontalCenter
-                      spacing: Style.space(8)
-
-                      PanelSlider {
-                        width: roomLightRow.themeSynced ? parent.width : parent.width - Style.space(30)
-                        bar: root.bar
-                        minimum: 1
-                        maximum: 254
-                        integer: true
-                        step: 10
-                        value: modelData.bri
-                        onReleased: function(v) { root.setBrightness(modelData.id, v) }
-                      }
-
-                      Item {
-                        visible: !roomLightRow.themeSynced
-                        width: Style.space(22)
-                        height: Style.space(22)
-
-                        Image {
-                          anchors.fill: parent
-                          source: Qt.resolvedUrl("hsv_wheel.png")
-                          fillMode: Image.Stretch
-                          smooth: true
-                        }
-
-                        Rectangle {
-                          anchors.fill: parent
-                          radius: Style.space(11)
-                          border.width: modelData.pickerOpen ? 2 : 1
-                          border.color: modelData.pickerOpen ? Color.accent : Qt.darker(root.bar.foreground, 1.6)
-                          color: "transparent"
-                        }
-
-                        MouseArea {
-                          anchors.fill: parent
-                          cursorShape: Qt.PointingHandCursor
-                          onClicked: root.toggleColorPicker(modelData.id)
-                        }
-                      }
-                    }
-
-                    ColorWheel {
-                      lightOn: modelData.on
-                      hasColor: modelData.hasColor
-                      pickerOpen: modelData.pickerOpen
-                      themeSynced: roomLightRow.themeSynced
-                      initialHue: modelData.hue
-                      initialSat: modelData.sat
-                      onColorSelected: function(hue, sat) { root.setLightColor(modelData.id, hue, sat) }
-                    }
-
-                    PanelSlider {
-                      visible: modelData.on && modelData.hasCt && !roomLightRow.themeSynced
-                      width: parent.width - Style.space(24)
-                      anchors.horizontalCenter: parent.horizontalCenter
-                      bar: root.bar
-                      minimum: modelData.ctMin
-                      maximum: modelData.ctMax
-                      integer: true
-                      step: 10
-                      value: modelData.ct
-                      onReleased: function(v) { root.setColorTemperature(modelData.id, v) }
-                    }
                   }
                 }
               }
@@ -1388,14 +1206,14 @@ Panel {
               anchors.fill: parent
               radius: Style.space(8)
               color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b,
-                headerMouse.containsMouse || emptyRoomsSection.expanded ? 0.10 : 0.05)
+                emptyRoomsHeaderMouse.containsMouse || emptyRoomsSection.expanded ? 0.10 : 0.05)
               border.width: 1
               border.color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b,
-                headerMouse.containsMouse || emptyRoomsSection.expanded ? 0.32 : 0.16)
+                emptyRoomsHeaderMouse.containsMouse || emptyRoomsSection.expanded ? 0.32 : 0.16)
             }
 
             MouseArea {
-              id: headerMouse
+              id: emptyRoomsHeaderMouse
               anchors.left: parent.left
               anchors.right: parent.right
               anchors.top: parent.top
@@ -1411,7 +1229,7 @@ Panel {
               anchors.rightMargin: Style.space(10)
               y: Style.space(8) + (headerRow.height - height) / 2
               text: "\u25b8"
-              color: headerMouse.containsMouse ? Color.accent : Qt.darker(root.bar.foreground, 1.4)
+              color: emptyRoomsHeaderMouse.containsMouse ? Color.accent : Qt.darker(root.bar.foreground, 1.4)
               font.family: root.bar.fontFamily
               font.pixelSize: Style.font.body
               rotation: emptyRoomsSection.expanded ? 90 : 0
@@ -1434,7 +1252,7 @@ Panel {
 
                 Text {
                   text: "Empty rooms"
-                  color: headerMouse.containsMouse ? Color.accent : root.bar.foreground
+                  color: emptyRoomsHeaderMouse.containsMouse ? Color.accent : root.bar.foreground
                   font.family: root.bar.fontFamily
                   font.pixelSize: Style.font.body
                   font.bold: true
@@ -1493,8 +1311,7 @@ Panel {
                         var turningOn = ts[modelData.id] === false
                         ts[modelData.id] = turningOn
                         root.themeSync = ts
-                        actionProc.command = HueApi.apiCmd(["write-theme-config", JSON.stringify(ts)])
-                        actionProc.running = true
+                        root.runAction(HueApi.apiCmd(["write-theme-config", JSON.stringify(ts)]))
                         if (turningOn) {
                           root.runAction(HueApi.apiCmd(["sync-room", modelData.id]))
                         }
@@ -1523,102 +1340,13 @@ Panel {
             Repeater {
               model: root.orphanLights
 
-              Column {
-                id: orphanLightRow
+              LightControls {
                 required property var modelData
+                light: modelData
+                controller: root
+                bar: root.bar
+                pickerOpen: root.pickerOpenById[modelData.id] === true
                 width: parent.width
-                spacing: Style.space(2)
-
-                InlineToggle {
-                  width: parent.width
-                  label: modelData.name
-                  titleSize: Style.font.body
-                  rowColor: HueApi.lightColor(modelData)
-                  checked: modelData.on
-                  foreground: Qt.darker(root.bar.foreground, 1.2)
-                  accent: Color.accent
-                  fontFamily: root.bar.fontFamily
-                  onClicked: root.toggleLight(modelData.id, !modelData.on)
-                }
-
-                PanelSlider {
-                  visible: modelData.on && modelData.hasBri
-                  width: parent.width - Style.space(24)
-                  anchors.horizontalCenter: parent.horizontalCenter
-                  bar: root.bar
-                  minimum: 1
-                  maximum: 254
-                  integer: true
-                  step: 10
-                  value: modelData.bri
-                  onReleased: function(v) { root.setBrightness(modelData.id, v) }
-                }
-
-                Row {
-                  visible: modelData.on && modelData.hasColor
-                  width: parent.width - Style.space(24)
-                  anchors.horizontalCenter: parent.horizontalCenter
-                  spacing: Style.space(8)
-
-                  PanelSlider {
-                    width: parent.width - Style.space(30)
-                    bar: root.bar
-                    minimum: 1
-                    maximum: 254
-                    integer: true
-                    step: 10
-                    value: modelData.bri
-                    onReleased: function(v) { root.setBrightness(modelData.id, v) }
-                  }
-
-                  Item {
-                    width: Style.space(22)
-                    height: Style.space(22)
-
-                    Image {
-                      anchors.fill: parent
-                      source: Qt.resolvedUrl("hsv_wheel.png")
-                      fillMode: Image.Stretch
-                      smooth: true
-                    }
-
-                    Rectangle {
-                      anchors.fill: parent
-                      radius: Style.space(11)
-                      border.width: modelData.pickerOpen ? 2 : 1
-                      border.color: modelData.pickerOpen ? Color.accent : Qt.darker(root.bar.foreground, 1.6)
-                      color: "transparent"
-                    }
-
-                    MouseArea {
-                      anchors.fill: parent
-                      cursorShape: Qt.PointingHandCursor
-                      onClicked: root.toggleColorPicker(modelData.id)
-                    }
-                  }
-                }
-
-                ColorWheel {
-                  lightOn: modelData.on
-                  hasColor: modelData.hasColor
-                  pickerOpen: modelData.pickerOpen
-                  initialHue: modelData.hue
-                  initialSat: modelData.sat
-                  onColorSelected: function(hue, sat) { root.setLightColor(modelData.id, hue, sat) }
-                }
-
-                PanelSlider {
-                  visible: modelData.on && modelData.hasCt
-                  width: parent.width - Style.space(24)
-                  anchors.horizontalCenter: parent.horizontalCenter
-                  bar: root.bar
-                  minimum: modelData.ctMin
-                  maximum: modelData.ctMax
-                  integer: true
-                  step: 10
-                  value: modelData.ct
-                  onReleased: function(v) { root.setColorTemperature(modelData.id, v) }
-                }
               }
             }
           }
