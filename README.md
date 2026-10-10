@@ -235,6 +235,9 @@ plugin so no auth token is left behind.
   is read from `/api/config` and saved as `bridgeId` in `hue.json`; requests
   are then addressed to that ID so the bridge certificate's hostname is
   matched, while the connection itself goes straight to the bridge's IP.
+- Bridge, pairing, and discovery requests reject HTTP redirects without reading
+  their response bodies. Successful JSON responses remain size-limited: 16 MiB
+  for the shared client and 1 MiB for pairing/discovery.
 - Automatic discovery tries **mDNS** first (`avahi-browse -t -r _hue._tcp`,
   the same on-LAN mechanism the official Hue app uses), then falls back to
   Philips' hosted lookup `discovery.meethue.com`. Pass an IP directly to

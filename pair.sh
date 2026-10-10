@@ -4,7 +4,8 @@ set -euo pipefail
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/settings"
 STATE_FILE="$STATE_DIR/hue.json"
 LOG_FILE="$(dirname "$STATE_DIR")/hue-pair.log"
-CACERT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/hue_bridge_cacert.pem"
+PLUGIN_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+CACERT="$PLUGIN_DIR/hue_bridge_cacert.pem"
 DEVICETYPE="${PHILIPS_HUE_DEVICETYPE:-philips#omarchy-hue}"
 DEVICETYPE="${DEVICETYPE//[^a-zA-Z0-9#_-]/}"
 REQUESTED_API="${PHILIPS_HUE_API_VERSION:-auto}"
@@ -72,9 +73,11 @@ print((ipv4[0] if ipv4 else (ips[0] if ips else '')), (ids[0].lower() if ids els
 
 discover_bridge_cloud() {
   local ip
-  ip=$(python3 - <<'PY' 2>/dev/null || true
-import json, urllib.request
-with urllib.request.urlopen("https://discovery.meethue.com/", timeout=5) as response:
+  ip=$(HUE_PLUGIN_DIR="$PLUGIN_DIR" python3 - <<'PY' 2>/dev/null || true
+import json, os, sys
+sys.path.insert(0, os.environ["HUE_PLUGIN_DIR"])
+from hue_transport import no_redirect_opener
+with no_redirect_opener().open("https://discovery.meethue.com/", timeout=5) as response:
     raw = response.read(1048577)
     if len(raw) > 1048576:
         raise SystemExit(1)
@@ -92,14 +95,16 @@ PY
 
 fetch_bridge_id() {
   local ip="$1" bridge_id
-  bridge_id=$(CACERT="$CACERT" TARGET_IP="$ip" python3 - <<'PY' 2>/dev/null || true
-import json, os, ssl, sys, urllib.request
+  bridge_id=$(CACERT="$CACERT" TARGET_IP="$ip" HUE_PLUGIN_DIR="$PLUGIN_DIR" python3 - <<'PY' 2>/dev/null || true
+import json, os, ssl, sys
+sys.path.insert(0, os.environ["HUE_PLUGIN_DIR"])
+from hue_transport import no_redirect_opener
 cacert = os.environ["CACERT"]
 target = os.environ["TARGET_IP"]
 ctx = ssl.create_default_context(cafile=cacert)
 ctx.check_hostname = False
 try:
-    with urllib.request.urlopen("https://%s/api/config" % target, timeout=5, context=ctx) as r:
+    with no_redirect_opener(ctx).open("https://%s/api/config" % target, timeout=5) as r:
         raw = r.read(1048577)
         if len(raw) > 1048576:
             raise SystemExit(1)
@@ -117,9 +122,11 @@ PY
 
 probe_v2() {
   local ip="$1" bridge_id="$2" username="$3"
-  TARGET_IP="$ip" BRIDGE_ID="$bridge_id" HUE_APPLICATION_KEY="$username" CACERT="$CACERT" \
+  TARGET_IP="$ip" BRIDGE_ID="$bridge_id" HUE_APPLICATION_KEY="$username" CACERT="$CACERT" HUE_PLUGIN_DIR="$PLUGIN_DIR" \
     python3 - <<'PY' >/dev/null 2>&1
-import json, os, socket, ssl, urllib.request
+import json, os, socket, ssl, sys, urllib.request
+sys.path.insert(0, os.environ["HUE_PLUGIN_DIR"])
+from hue_transport import no_redirect_opener
 ip = os.environ["TARGET_IP"]
 hostname = os.environ["BRIDGE_ID"]
 key = os.environ["HUE_APPLICATION_KEY"]
@@ -133,7 +140,7 @@ context = ssl.create_default_context(cafile=os.environ["CACERT"])
 request = urllib.request.Request(
     "https://%s/clip/v2/resource/bridge" % hostname,
     headers={"hue-application-key": key, "Accept": "application/json"})
-with urllib.request.urlopen(request, timeout=5, context=context) as response:
+with no_redirect_opener(context).open(request, timeout=5) as response:
     raw = response.read(1048577)
     if len(raw) > 1048576:
         raise SystemExit(1)
@@ -147,8 +154,10 @@ pair() {
   local ip="$1" bridge_id="$2" response username
   local now ts deadline=$(( $(date +%s) + 90 ))
   while :; do
-    response=$(TARGET_IP="$ip" BRIDGE_ID="$bridge_id" DEVICETYPE="$DEVICETYPE" CACERT="$CACERT" python3 - <<'PY' 2>/dev/null || true
-import json, os, socket, ssl, urllib.request
+    response=$(TARGET_IP="$ip" BRIDGE_ID="$bridge_id" DEVICETYPE="$DEVICETYPE" CACERT="$CACERT" HUE_PLUGIN_DIR="$PLUGIN_DIR" python3 - <<'PY' 2>/dev/null || true
+import json, os, socket, ssl, sys, urllib.request
+sys.path.insert(0, os.environ["HUE_PLUGIN_DIR"])
+from hue_transport import no_redirect_opener
 ip = os.environ["TARGET_IP"]
 hostname = os.environ["BRIDGE_ID"]
 devicetype = os.environ["DEVICETYPE"]
@@ -165,7 +174,7 @@ request = urllib.request.Request(
     headers={"Content-Type": "application/json"},
     method="POST",
 )
-with urllib.request.urlopen(request, timeout=5, context=context) as response:
+with no_redirect_opener(context).open(request, timeout=5) as response:
     raw = response.read(1048577)
     if len(raw) > 1048576:
         raise SystemExit(1)
