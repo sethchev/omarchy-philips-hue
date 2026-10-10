@@ -21,6 +21,8 @@ Item {
   property real dragHue: initialHue
   property real dragSat: initialSat
   property bool picking: false
+  onInitialHueChanged: if (!picking) dragHue = initialHue
+  onInitialSatChanged: if (!picking) dragSat = initialSat
 
   Image {
     anchors.fill: parent
@@ -70,5 +72,6 @@ Item {
       root.picking = false
       root.colorSelected(root.dragHue, root.dragSat)
     }
+    onCanceled: root.picking = false
   }
 }

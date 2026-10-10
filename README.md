@@ -27,6 +27,12 @@ Omarchy / Quickshell bar widget for controlling Philips Hue lights over the brid
 - State refreshes are serialized and validate command output before updating the
   panel, preventing overlapping requests or partial results from appearing as a
   successful refresh
+- Refreshes use one helper process and one resource read on v2; v1 reads lights,
+  groups, and scenes once each. Failed refreshes preserve the last complete state.
+- Commands run in order, report failures in the panel, and refresh state after
+  the queue drains. Color pickers stay open across refreshes.
+- The master toggle includes lights outside rooms. Light counts are unique even
+  when a bulb belongs to both a room and a zone.
 - Keyboard-accessible room, favorite, and scene controls
 - Supports both the classic Hue API v1 and CLIP API v2
 - Reads credentials from `~/.local/state/omarchy/settings/hue.json`
@@ -242,3 +248,22 @@ plugin so no auth token is left behind.
   survive migration.
 - Credentials are stored per-user in `~/.local/state/omarchy/settings/hue.json`;
   keep that file out of version control.
+
+## Development checks
+
+Run the Python client/pairing tests and the panel state regression tests:
+
+```sh
+python3 -B -m unittest discover -s tests -v
+node --test tests/test_panel.js
+bash -n pair.sh cleanup.sh theme-sync/45-hue.sh theme-sync/enable-theme-sync.sh
+```
+
+Node.js is needed only for the development tests. The panel tests execute its
+JavaScript functions with mocked process and timer boundaries; neither suite
+reads your bridge credentials or sends requests to your lights. With Qt tooling
+installed, `qmlformat --normalize` can parse the QML files without editing them.
+
+Marketplace verification requires a fresh scan and maintainer approval for the
+exact published commit. A local security preflight does not confer verified
+status. See the marketplace's [verification process](https://github.com/omacom/omarchy-plugin-marketplace/blob/main/VERIFICATION.md).

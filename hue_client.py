@@ -279,10 +279,23 @@ class HueClient:
             return self._get_v1_state()
         return self._normalize_v2(self._v2_data())
 
+    def get_snapshot(self) -> dict:
+        """Fetch a complete panel snapshot without repeating resource reads."""
+        if self.api_version == "v1":
+            state = self._get_v1_state()
+            state["scenes"] = self._normalize_v1_scenes(
+                self._request("GET", "/scenes"), state["groups"])
+        else:
+            resources = self._v2_data()
+            state = self._normalize_v2(resources)
+            state["scenes"] = self._normalize_v2_scenes(resources)
+        return state
+
     def get_lights(self) -> dict:
         if self.api_version == "v1":
             return self._normalize_v1_lights(self._request("GET", "/lights"))
-        return self._normalize_v2(self._v2_data("/light"))["lights"]
+        # Connectivity is attached to the owning device, not the light.
+        return self._normalize_v2(self._v2_data())["lights"]
 
     def get_groups(self) -> dict:
         if self.api_version == "v1":
@@ -325,7 +338,7 @@ class HueClient:
     def _get_v1_state(self) -> dict:
         lights = self._normalize_v1_lights(self._request("GET", "/lights"))
         groups = self._normalize_v1_groups(self._request("GET", "/groups"))
-        return {"apiVersion": "v1", "lights": lights, "groups": groups}
+        return {"apiVersion": "v1", "lights": lights, "groups": groups, "allControlId": "0"}
 
     def _normalize_v2(self, resources: list[dict]) -> dict:
         by_type: dict[str, list[dict]] = {}
@@ -333,6 +346,11 @@ class HueClient:
             if isinstance(resource, dict):
                 by_type.setdefault(str(resource.get("type") or ""), []).append(resource)
 
+        connectivity = {
+            str((item.get("owner") or {}).get("rid")): item.get("status")
+            for item in by_type.get("zigbee_connectivity", [])
+            if (item.get("owner") or {}).get("rtype") == "device"
+        }
         lights = {}
         device_lights: dict[str, list[str]] = {}
         for resource in by_type.get("light", []):
@@ -367,7 +385,9 @@ class HueClient:
                 "api_id": str(resource.get("id") or logical_id),
                 "device_id": device_id,
                 "state": {
-                    "on": on, "reachable": True, "bri": max(1, bri) if has_bri else 0,
+                    "on": on,
+                    "reachable": connectivity.get(device_id) not in ("disconnected", "connectivity_issue"),
+                    "bri": max(1, bri) if has_bri else 0,
                     "ct": ct, "hue": hue, "sat": sat,
                     "xy": xy, "colormode": "xy" if has_color else ("ct" if has_ct else "")
                 },
@@ -408,7 +428,9 @@ class HueClient:
                     "lights": light_ids,
                     "state": {"any_on": any_on, "all_on": all_on},
                 }
-        return {"apiVersion": "v2", "lights": lights, "groups": groups}
+        all_control_id = next((str(item["id"]) for item in by_type.get("grouped_light", [])
+                               if item.get("id") and (item.get("owner") or {}).get("rtype") == "bridge_home"), "")
+        return {"apiVersion": "v2", "lights": lights, "groups": groups, "allControlId": all_control_id}
 
     @staticmethod
     def _valid_resource_id(resource_id: str, v2=False) -> str:
@@ -455,25 +477,33 @@ class HueClient:
         if self.api_version == "v1":
             scenes = self._request("GET", "/scenes")
             groups = self._request("GET", "/groups")
-            if not isinstance(scenes, dict) or not isinstance(groups, dict):
-                raise HueError("Invalid Hue v1 scenes response")
-            normalized = {}
-            for scene_id, scene in scenes.items():
-                group_id = str(scene.get("group") or "")
-                if not group_id:
-                    continue
-                active_scene = str(((groups.get(group_id) or {}).get("action") or {}).get("scene") or "")
-                normalized[str(scene_id)] = {
-                    "id": str(scene_id),
-                    "api_id": str(scene_id),
-                    "name": str(scene.get("name") or "Scene %s" % scene_id),
-                    "group": group_id,
-                    "group_api_id": group_id,
-                    "active": active_scene == str(scene_id),
-                }
-            return normalized
+            return self._normalize_v1_scenes(scenes, groups)
+        return self._normalize_v2_scenes(self._v2_data("/scene"))
+
+    @staticmethod
+    def _normalize_v1_scenes(scenes, groups) -> dict:
+        if not isinstance(scenes, dict) or not isinstance(groups, dict):
+            raise HueError("Invalid Hue v1 scenes response")
         normalized = {}
-        for scene in self._v2_data("/scene"):
+        for scene_id, scene in scenes.items():
+            group_id = str(scene.get("group") or "")
+            if not group_id:
+                continue
+            active_scene = str(((groups.get(group_id) or {}).get("action") or {}).get("scene") or "")
+            normalized[str(scene_id)] = {
+                "id": str(scene_id), "api_id": str(scene_id),
+                "name": str(scene.get("name") or "Scene %s" % scene_id),
+                "group": group_id, "group_api_id": group_id,
+                "active": active_scene == str(scene_id),
+            }
+        return normalized
+
+    @staticmethod
+    def _normalize_v2_scenes(resources) -> dict:
+        normalized = {}
+        for scene in resources:
+            if scene.get("type") != "scene":
+                continue
             metadata = scene.get("metadata") or {}
             group = scene.get("group") or {}
             scene_id = str(scene.get("id") or "")
@@ -489,6 +519,21 @@ class HueClient:
                 "active": str((scene.get("status") or {}).get("active") or "inactive") != "inactive",
             }
         return normalized
+
+    def put_all(self, light_ids: list[str], body: dict):
+        if not isinstance(light_ids, list) or not light_ids:
+            raise HueError("Light IDs must be a nonempty list")
+        ids = list(dict.fromkeys(self._valid_resource_id(item, self.api_version == "v2") for item in light_ids))
+        # Continue after a failed light so one unreachable bulb cannot prevent
+        # the rest of the bridge from responding to the master toggle.
+        failures = 0
+        for light_id in ids:
+            try:
+                self.put_light(light_id, body)
+            except HueError:
+                failures += 1
+        if failures:
+            raise HueError("Could not update %d/%d lights" % (failures, len(ids)))
 
     @staticmethod
     def _scene_key(name: str) -> str:
