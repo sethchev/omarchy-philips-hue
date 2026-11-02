@@ -29,6 +29,7 @@ Panel {
   property bool fetchScheduled: false
   property bool refreshRequested: false
   property bool loading: false
+  property var fetchDiagnostic: null
   property bool lastFetchFailed: false
   property int consecutiveFetchFailures: 0
   property string lastSuccessfulFetch: ""
@@ -40,6 +41,9 @@ Panel {
   property var pickerOpenById: ({})
   property var expandedRooms: ({})
   property var expandedSceneMenus: ({})
+  property var sceneQueries: ({})
+  property var scenePages: ({})
+  readonly property int scenePageSize: 6
   property string sceneStatus: ""
   property string sceneStatusRoomId: ""
   property int sceneActionId: 0
@@ -55,7 +59,7 @@ Panel {
   readonly property string statusText: {
     if (root.config === null) return "Not paired"
     var refreshed = root.lastSuccessfulFetch ? " · Updated " + root.lastSuccessfulFetch : ""
-    if (root.lastFetchFailed) return "Bridge unreachable" + refreshed
+    if (root.lastFetchFailed) return (root.fetchDiagnostic ? root.fetchDiagnostic.label : "Bridge unreachable") + refreshed
     if (root.loading) return "Loading…"
     var roomLabel = root.lightedRoomCount + " room" + (root.lightedRoomCount === 1 ? "" : "s")
     var unreachable = root.unreachableLightCount()
@@ -151,6 +155,8 @@ Panel {
 
   function prepareFetch(proc, args) {
     proc.fetchOutput = ""
+    proc.fetchError = ""
+    proc.fetchErrorFinished = false
     proc.fetchOutputFinished = false
     proc.fetchExitCode = -1
     proc.fetchExited = false
@@ -160,7 +166,7 @@ Panel {
   }
 
   function tryCompleteFetch(proc) {
-    if (proc.fetchReported || !proc.fetchOutputFinished || !proc.fetchExited) return
+    if (proc.fetchReported || !proc.fetchOutputFinished || !proc.fetchErrorFinished || !proc.fetchExited) return
     proc.fetchReported = true
     // A command or credential change during the read invalidates this snapshot.
     if (proc.fetchRevision !== root.stateRevision || !root.config) {
@@ -177,6 +183,7 @@ Panel {
       root.allControlId = snapshot.allControlId
       root.assembleRooms()
     }
+    root.fetchDiagnostic = snapshot ? null : HueApi.connectionDiagnostic(proc.fetchError, proc.fetchExitCode, proc.fetchExitCode === 0)
     root.finishFetch(snapshot !== null)
   }
 
@@ -336,13 +343,38 @@ Panel {
     return root.expandedSceneMenus[roomId] === true
   }
 
-  function roomSceneActive(room, sceneName) {
-    var wanted = String(sceneName).trim().toLowerCase()
-    for (var i = 0; i < root.scenes.length; i++) {
-      var scene = root.scenes[i]
-      if (scene.active && scene.groupApiId === room.apiId && scene.name.trim().toLowerCase() === wanted) return true
-    }
-    return false
+  function roomSceneChoices(room) {
+    return HueApi.roomSceneChoices(room, root.scenes, root.prebuiltScenes, root.sceneQueries[room.id] || "")
+  }
+
+  function roomSceneCount(room) {
+    return HueApi.roomSceneChoices(room, root.scenes, root.prebuiltScenes, "").length
+  }
+
+  function roomScenePageIndex(room) {
+    var last = Math.max(0, Math.ceil(root.roomSceneChoices(room).length / root.scenePageSize) - 1)
+    return Math.max(0, Math.min(last, root.scenePages[room.id] || 0))
+  }
+
+  function roomScenePage(room) {
+    var start = root.roomScenePageIndex(room) * root.scenePageSize
+    return root.roomSceneChoices(room).slice(start, start + root.scenePageSize)
+  }
+
+  function setSceneQuery(roomId, query) {
+    var queries = root.lightClone(root.sceneQueries, {})
+    queries[roomId] = query
+    root.sceneQueries = queries
+    var pages = root.lightClone(root.scenePages, {})
+    pages[roomId] = 0
+    root.scenePages = pages
+  }
+
+  function changeScenePage(room, step) {
+    var pages = root.lightClone(root.scenePages, {})
+    var last = Math.max(0, Math.ceil(root.roomSceneChoices(room).length / root.scenePageSize) - 1)
+    pages[room.id] = Math.max(0, Math.min(last, root.roomScenePageIndex(room) + step))
+    root.scenePages = pages
   }
 
   function toggleRoomScenes(roomId) {
@@ -351,14 +383,19 @@ Panel {
     root.expandedSceneMenus = map
   }
 
-  function applyScene(roomId, sceneName) {
+  function applyScene(roomId, sceneName, sceneId) {
     if (!root.config) return
+    var room = root.roomById(roomId)
+    if (!room) return
     sceneStatusTimer.stop()
     root.sceneStatusRoomId = roomId
     root.sceneStatus = "Applying " + sceneName + "…"
-    root.sceneActionId = root.runAction(HueApi.apiCmd(["apply-scene", sceneName, roomId]), {
-      roomId: roomId, sceneName: sceneName
-    })
+    var args = sceneId ? ["recall-scene", sceneId, room.controlId || room.id] : ["apply-scene", sceneName, roomId]
+    root.sceneActionId = root.runAction(HueApi.apiCmd(args), { roomId: roomId, sceneName: sceneName })
+  }
+
+  function applySceneChoice(roomId, choice) {
+    root.applyScene(roomId, choice.name, choice.preset ? "" : choice.id)
   }
 
   function toggleColorPicker(lightId) {
@@ -462,9 +499,8 @@ Panel {
     var context = root.currentAction.context
     var failed = actionProc.actionExitCode !== 0
     if (failed) {
-      root.actionError = actionProc.actionExitCode === 124 || actionProc.actionExitCode === 137
-        ? "Hue command timed out. Retrying state refresh."
-        : actionProc.errorOutput.trim() || "Hue command failed. Retrying state refresh."
+      var diagnostic = HueApi.connectionDiagnostic(actionProc.errorOutput, actionProc.actionExitCode, false)
+      root.actionError = diagnostic.label + ". " + diagnostic.hint
       themeConfigFile.reload()
     }
     if (context.sceneName && root.currentAction.id === root.sceneActionId) {
@@ -573,6 +609,8 @@ Panel {
   Process {
     id: stateProc
     property int fetchRevision: 0
+    property string fetchError: ""
+    property bool fetchErrorFinished: false
     property string fetchOutput: ""
     property bool fetchOutputFinished: false
     property int fetchExitCode: -1
@@ -583,6 +621,14 @@ Panel {
       onStreamFinished: {
         stateProc.fetchOutput = text
         stateProc.fetchOutputFinished = true
+        root.tryCompleteFetch(stateProc)
+      }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        stateProc.fetchError = text
+        stateProc.fetchErrorFinished = true
         root.tryCompleteFetch(stateProc)
       }
     }
@@ -670,6 +716,9 @@ Panel {
               }
 
               Text {
+                width: Math.max(0, column.width - Style.space(36))
+                elide: Text.ElideRight
+                textFormat: Text.PlainText
                 text: root.statusText
                 color: Qt.darker(root.bar.foreground, 1.4)
                 font.family: root.bar.fontFamily
@@ -766,24 +815,16 @@ Panel {
           }
 
           Text {
-            visible: root.config !== null && root.lastFetchFailed && !root.loading
+            visible: root.actionError !== "" || (root.config !== null && root.lastFetchFailed && !root.loading)
             width: parent.width
-            text: "Couldn't reach the bridge. Check that it's on and the IP is valid. Retrying automatically with increasing delays."
-            color: Color.urgent
-            font.family: root.bar.fontFamily
-            font.pixelSize: Style.font.caption
-            wrapMode: Text.WordWrap
-          }
-
-          Text {
-            visible: root.actionError !== ""
-            width: parent.width
-            text: root.actionError
+            text: root.actionError || (root.fetchDiagnostic ? root.fetchDiagnostic.hint : "Check bridge power and network, then retry.")
             textFormat: Text.PlainText
             color: Color.urgent
             font.family: root.bar.fontFamily
             font.pixelSize: Style.font.caption
             wrapMode: Text.WordWrap
+            maximumLineCount: 2
+            elide: Text.ElideRight
           }
 
           BorderSurface {
@@ -1132,58 +1173,12 @@ Panel {
                     }
                   }
 
-                  Grid {
-                    id: roomSceneGrid
+                  SceneBrowser {
                     visible: roomScenesHeader.menuOpen
                     width: parent.width
-                    columns: 2
-                    spacing: Style.space(2)
-
-                    Repeater {
-                      model: root.prebuiltScenes
-
-                      BorderSurface {
-                        id: roomSceneTile
-                        required property string modelData
-                        width: (roomSceneGrid.width - roomSceneGrid.spacing) / 2
-                        height: Math.max(46, Style.font.body + Style.spacing.huge)
-                        radius: Style.cornerRadius
-                        readonly property bool sceneActive: root.roomSceneActive(roomColumn.modelData, modelData)
-                        readonly property bool hot: roomSceneMouse.containsMouse || activeFocus
-                        color: sceneActive
-                          ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, hot ? 0.34 : 0.24)
-                          : Style.controlFill(activeFocus, hot, Qt.darker(root.bar.foreground, 1.2), Color.accent)
-                        borderSpec: Border.controlSpec(sceneActive ? "focus" : (activeFocus ? "focus" : (hot ? "hover-cursor" : "normal")), Qt.darker(root.bar.foreground, 1.2), Color.accent)
-
-                        activeFocusOnTab: true
-                        Accessible.role: Accessible.Button
-                        Accessible.name: (sceneActive ? "Active scene " : "Apply scene ") + modelData + " for " + roomColumn.modelData.name
-                        Keys.onReturnPressed: root.applyScene(roomColumn.modelData.id, modelData)
-                        Keys.onEnterPressed: root.applyScene(roomColumn.modelData.id, modelData)
-                        Keys.onSpacePressed: root.applyScene(roomColumn.modelData.id, modelData)
-
-                        MouseArea {
-                          id: roomSceneMouse
-                          anchors.fill: parent
-                          hoverEnabled: true
-                          cursorShape: Qt.PointingHandCursor
-                          onClicked: root.applyScene(roomColumn.modelData.id, roomSceneTile.modelData)
-                        }
-
-                        Text {
-                          anchors.centerIn: parent
-                          width: parent.width - Style.space(12)
-                          text: (roomSceneTile.sceneActive ? "✓ " : "") + roomSceneTile.modelData
-                          textFormat: Text.PlainText
-                          horizontalAlignment: Text.AlignHCenter
-                          wrapMode: Text.WordWrap
-                          color: roomSceneTile.sceneActive ? Color.accent : Qt.darker(root.bar.foreground, 1.2)
-                          font.family: root.bar.fontFamily
-                          font.pixelSize: Style.font.body
-                          font.bold: true
-                        }
-                      }
-                    }
+                    room: roomColumn.modelData
+                    controller: root
+                    bar: root.bar
                   }
                 }
 

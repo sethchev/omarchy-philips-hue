@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import colorsys
+import functools
+import http.client
 import json
 import ipaddress
 import math
@@ -43,7 +45,20 @@ PREBUILT_SCENES = {
 
 
 class HueError(RuntimeError):
-    pass
+    def __init__(self, message: str, code: str = "request"):
+        super().__init__(message)
+        self.code = code
+
+
+def _normalized_response(function):
+    """Treat malformed resource shapes as response errors, without raw data."""
+    @functools.wraps(function)
+    def normalize(*args, **kwargs):
+        try:
+            return function(*args, **kwargs)
+        except (AttributeError, KeyError, TypeError, ValueError, OverflowError) as error:
+            raise HueError("Bridge returned malformed resource data", "response") from error
+    return normalize
 
 
 class _BridgeResolver:
@@ -121,8 +136,11 @@ def write_json_secure(path: Path, value) -> None:
 def _json_load_response(response, limit: int = _MAX_RESPONSE_BYTES):
     data = response.read(limit + 1)
     if len(data) > limit:
-        raise HueError("Response exceeds maximum allowed size")
-    return json.loads(data.decode("utf-8", "replace"))
+        raise HueError("Response exceeds maximum allowed size", "response")
+    try:
+        return json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise HueError("Bridge returned invalid JSON", "response") from error
 
 
 def configured_api_version(creds: dict) -> str:
@@ -244,7 +262,10 @@ class HueClient:
     def _get_opener(self, verify_hostname: bool):
         key = verify_hostname
         if not self._opener or self._opener[0] != key:
-            context = ssl.create_default_context(cafile=str(CACERT))
+            try:
+                context = ssl.create_default_context(cafile=str(CACERT))
+            except (OSError, ssl.SSLError) as error:
+                raise HueError("Could not initialize bridge TLS verification", "tls") from error
             context.check_hostname = verify_hostname
             self._opener = (key, no_redirect_opener(context))
         return self._opener[1]
@@ -268,27 +289,56 @@ class HueClient:
             else:
                 with opener.open(request, timeout=5) as response:
                     result = _json_load_response(response)
-        except (OSError, ValueError, urllib.error.URLError) as error:
-            raise HueError("Bridge request failed: %s" % type(error).__name__) from error
+        except urllib.error.HTTPError as error:
+            error.close()
+            if error.code in (401, 403):
+                raise HueError("Bridge authentication failed", "auth") from error
+            raise HueError("Bridge returned an HTTP error", "response") from error
+        except urllib.error.URLError as error:
+            reason = error.reason
+            if isinstance(reason, ssl.SSLError):
+                raise HueError("Bridge TLS connection failed", "tls") from error
+            if isinstance(reason, TimeoutError):
+                raise HueError("Bridge request timed out", "timeout") from error
+            raise HueError("Could not connect to the bridge", "connection") from error
+        except ssl.SSLError as error:
+            raise HueError("Bridge TLS connection failed", "tls") from error
+        except TimeoutError as error:
+            raise HueError("Bridge request timed out", "timeout") from error
+        except OSError as error:
+            raise HueError("Could not connect to the bridge", "connection") from error
+        except (http.client.HTTPException, ValueError) as error:
+            raise HueError("Bridge returned an invalid response", "response") from error
         self._check_response(result)
         return result
 
     def _check_response(self, result):
         if self.api_version == "v2":
-            errors = result.get("errors", []) if isinstance(result, dict) else []
+            if not isinstance(result, dict) or not isinstance(result.get("errors"), list):
+                raise HueError("Invalid Hue v2 response", "response")
+            errors = result["errors"]
             if errors:
-                description = errors[0].get("description", "Hue v2 request failed") if isinstance(errors[0], dict) else "Hue v2 request failed"
-                raise HueError(description)
+                # Authentication failures normally arrive as HTTP 401/403.
+                description = str(errors[0].get("description", "")) if isinstance(errors[0], dict) else ""
+                if description.strip().lower() in ("unauthorized", "unauthorized user", "invalid application key"):
+                    raise HueError("Bridge authentication failed", "auth")
+                raise HueError("Bridge rejected the request", "request")
+            if not isinstance(result.get("data"), list):
+                raise HueError("Invalid Hue v2 response", "response")
         elif isinstance(result, list):
             errors = [item.get("error") for item in result if isinstance(item, dict) and item.get("error")]
             if errors:
-                raise HueError(str(errors[0].get("description") or "Hue v1 request failed"))
+                if not isinstance(errors[0], dict):
+                    raise HueError("Invalid Hue v1 error response", "response")
+                if errors[0].get("type") == 1:
+                    raise HueError("Bridge authentication failed", "auth")
+                raise HueError("Bridge rejected the request", "request")
 
     def _v2_data(self, path="") -> list[dict]:
         result = self._request("GET", path)
         data = result.get("data") if isinstance(result, dict) else None
         if not isinstance(data, list):
-            raise HueError("Invalid Hue v2 response")
+            raise HueError("Invalid Hue v2 response", "response")
         return data
 
     def get_state(self) -> dict:
@@ -321,9 +371,10 @@ class HueClient:
         # normalization needs the related light resources as well.
         return self._normalize_v2(self._v2_data())["groups"]
 
+    @_normalized_response
     def _normalize_v1_lights(self, lights: dict) -> dict:
         if not isinstance(lights, dict):
-            raise HueError("Invalid Hue v1 lights response")
+            raise HueError("Invalid Hue v1 lights response", "response")
         normalized = {}
         for light_id, light in lights.items():
             item = dict(light)
@@ -341,9 +392,10 @@ class HueClient:
             normalized[str(light_id)] = item
         return normalized
 
+    @_normalized_response
     def _normalize_v1_groups(self, groups: dict) -> dict:
         if not isinstance(groups, dict):
-            raise HueError("Invalid Hue v1 groups response")
+            raise HueError("Invalid Hue v1 groups response", "response")
         normalized = {}
         for group_id, group in groups.items():
             item = dict(group)
@@ -357,6 +409,7 @@ class HueClient:
         groups = self._normalize_v1_groups(self._request("GET", "/groups"))
         return {"apiVersion": "v1", "lights": lights, "groups": groups, "allControlId": "0"}
 
+    @_normalized_response
     def _normalize_v2(self, resources: list[dict]) -> dict:
         by_type: dict[str, list[dict]] = {}
         for resource in resources:
@@ -500,9 +553,10 @@ class HueClient:
         return self._normalize_v2_scenes(self._v2_data("/scene"))
 
     @staticmethod
+    @_normalized_response
     def _normalize_v1_scenes(scenes, groups) -> dict:
         if not isinstance(scenes, dict) or not isinstance(groups, dict):
-            raise HueError("Invalid Hue v1 scenes response")
+            raise HueError("Invalid Hue v1 scenes response", "response")
         normalized = {}
         for scene_id, scene in scenes.items():
             group_id = str(scene.get("group") or "")
@@ -518,6 +572,7 @@ class HueClient:
         return normalized
 
     @staticmethod
+    @_normalized_response
     def _normalize_v2_scenes(resources) -> dict:
         normalized = {}
         for scene in resources:
@@ -546,13 +601,16 @@ class HueClient:
         # Continue after a failed light so one unreachable bulb cannot prevent
         # the rest of the bridge from responding to the master toggle.
         failures = 0
+        failure_codes = set()
         for light_id in ids:
             try:
                 self.put_light(light_id, body)
-            except HueError:
+            except HueError as error:
                 failures += 1
+                failure_codes.add(error.code)
         if failures:
-            raise HueError("Could not update %d/%d lights" % (failures, len(ids)))
+            code = next(iter(failure_codes)) if len(failure_codes) == 1 else "request"
+            raise HueError("Could not update %d/%d lights" % (failures, len(ids)), code)
 
     @staticmethod
     def _scene_key(name: str) -> str:
@@ -838,6 +896,7 @@ def theme_sync(theme_slug: str = "", room_id: str | None = None) -> tuple[int, i
             if (cfg.get("themeSync") or {}).get(group_id) is False:
                 claimed.update(group.get("lights", []))
     sent, total, failures = 0, 0, 0
+    failure_codes = set()
     for group_id, group in targets:
         member_ids = list(dict.fromkeys(group.get("lights", [])))
         owned_ids = [light_id for light_id in member_ids if light_id not in claimed]
@@ -872,7 +931,8 @@ def theme_sync(theme_slug: str = "", room_id: str | None = None) -> tuple[int, i
             for light, body in updates:
                 try:
                     client.put_light(light["api_id"], body, light)
-                except HueError:
+                except HueError as error:
+                    failure_codes.add(error.code)
                     room_failed = True
                     secure_log("theme sync: light %s in group %s failed" % (light["api_id"], group_id))
         else:
@@ -883,7 +943,8 @@ def theme_sync(theme_slug: str = "", room_id: str | None = None) -> tuple[int, i
                 group_body.update(body)
             try:
                 client.put_group(group["control_id"], group_body)
-            except HueError:
+            except HueError as error:
+                failure_codes.add(error.code)
                 room_failed = True
                 secure_log("theme sync: group %s failed" % group_id)
         if room_failed:
@@ -892,5 +953,6 @@ def theme_sync(theme_slug: str = "", room_id: str | None = None) -> tuple[int, i
             sent += 1
     secure_log("theme sync: %d/%d group(s) via %s -> #%s" % (sent, total, client.api_version, color))
     if failures:
-        raise HueError("Theme sync partially completed: %d/%d group(s) succeeded" % (sent, total))
+        code = next(iter(failure_codes)) if len(failure_codes) == 1 else "request"
+        raise HueError("Theme sync partially completed: %d/%d group(s) succeeded" % (sent, total), code)
     return sent, total

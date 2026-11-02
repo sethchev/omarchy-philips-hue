@@ -23,7 +23,8 @@ function harness() {
       fetchScheduled: false, refreshRequested: false, loading: false,
       lastFetchFailed: false, consecutiveFetchFailures: 0,
       lastSuccessfulFetch: 'previous', sceneStatus: '', sceneStatusRoomId: '',
-      actionError: '', opened: true
+      actionError: '', opened: true, fetchDiagnostic: null,
+      sceneQueries: {}, scenePages: {}, scenePageSize: 6, prebuiltScenes: ['Relax', 'Read', 'Natural Light', 'Tv Mode']
     }
   };
   vm.createContext(ctx);
@@ -101,7 +102,7 @@ test('refresh waits for exit and stdout, commits all resources, keeps picker sta
   h.root.toggleColorPicker('1');
   h.root.refresh(); h.flush();
   assert.equal(h.stateProc.command[5], 'get-state');
-  Object.assign(h.stateProc, {fetchOutput: snapshot(), fetchOutputFinished: true});
+  Object.assign(h.stateProc, {fetchOutput: snapshot(), fetchOutputFinished: true, fetchErrorFinished: true});
   h.root.tryCompleteFetch(h.stateProc);
   assert.equal(h.root.pendingFetches, 1);
   Object.assign(h.stateProc, {fetchExited: true, fetchExitCode: 0});
@@ -116,7 +117,7 @@ test('malformed or incomplete snapshot retains the entire last good state', () =
     const h = harness(); load(h);
     const previous = h.root.lightsById, rooms = h.root.rooms, scenes = h.root.scenes;
     h.root.refresh(); h.flush();
-    Object.assign(h.stateProc, {fetchOutput: bad, fetchOutputFinished: true, fetchExited: true, fetchExitCode: 0});
+    Object.assign(h.stateProc, {fetchOutput: bad, fetchOutputFinished: true, fetchErrorFinished: true, fetchExited: true, fetchExitCode: 0});
     h.root.tryCompleteFetch(h.stateProc);
     assert.equal(h.root.lastFetchFailed, true);
     assert.equal(h.root.lastSuccessfulFetch, 'previous');
@@ -130,7 +131,7 @@ test('late fetch cannot revert a newer optimistic action', () => {
   const h = harness(); load(h);
   h.root.refresh(); h.flush();
   h.root.toggleLight('2', true);
-  Object.assign(h.stateProc, {fetchOutput: snapshot(), fetchOutputFinished: true, fetchExited: true, fetchExitCode: 0});
+  Object.assign(h.stateProc, {fetchOutput: snapshot(), fetchOutputFinished: true, fetchErrorFinished: true, fetchExited: true, fetchExitCode: 0});
   h.root.tryCompleteFetch(h.stateProc);
   assert.equal(h.root.lightsById['2'].on, true);
   assert.equal(h.root.refreshRequested, true);
@@ -165,10 +166,10 @@ test('action failures report stderr and reconcile settings; scenes wait for comp
   h.actionProc.actionExitCode = 1;
   h.root.tryCompleteAction();
   assert.notEqual(h.root.currentAction, null);
-  h.actionProc.errorOutput = 'Hue error: unauthorized\n';
+  h.actionProc.errorOutput = JSON.stringify({error: {code: 'auth', message: 'Bridge authentication failed'}});
   h.actionProc.actionOutputFinished = true;
   h.root.tryCompleteAction(); h.flush();
-  assert.equal(h.root.actionError, 'Hue error: unauthorized');
+  assert.equal(h.root.actionError, 'Authentication failed. Re-pair the bridge to renew access.');
   assert.equal(h.root.sceneStatus, 'Could not apply Relax');
   assert.equal(h.themeConfigFile.count, 1);
   assert.equal(h.sceneStatusTimer.count, 1);
@@ -203,10 +204,10 @@ test('action failure triggers a refresh that replaces optimistic state', () => {
   assert.equal(h.root.lightsById['2'].on, true);
   completeAction(h, 1, 'Hue error: failed');
   h.root.refresh(); h.flush();
-  Object.assign(h.stateProc, {fetchOutput: snapshot(), fetchOutputFinished: true, fetchExited: true, fetchExitCode: 0});
+  Object.assign(h.stateProc, {fetchOutput: snapshot(), fetchOutputFinished: true, fetchErrorFinished: true, fetchExited: true, fetchExitCode: 0});
   h.root.tryCompleteFetch(h.stateProc);
   assert.equal(h.root.lightsById['2'].on, false);
-  assert.equal(h.root.actionError, 'Hue error: failed');
+  assert.equal(h.root.actionError, 'Hue command failed. Refresh and try again.');
 });
 
 
@@ -272,5 +273,84 @@ test('color writes pass v2 snapshot gamut while retaining v1 gamut compatibility
   h.root.config.apiVersion = 'v1';
   h.root.lightsById['1'].gamut = [[0.7, 0.3], [0.17, 0.7], [0.15, 0.06]];
   h.root.setLightColor('1', 1000, 200);
-  assert.equal(h.actionProc.command.length, 8);
+  assert.equal(h.actionProc.command.length, 9);
+});
+
+test('room scene browser includes saved scenes, preserves duplicate names, and scopes by room', () => {
+  const h = harness(); load(h);
+  const room = h.root.roomById('4');
+  room.apiId = 'room-uuid';
+  h.root.scenes = [
+    {id: 'b', name: 'Sunset', groupApiId: room.apiId, active: false},
+    {id: 'a', name: 'Sunset', groupApiId: room.apiId, active: true},
+    {id: 'read', name: 'Read', groupApiId: room.apiId, active: false},
+    {id: 'elsewhere', name: 'Other scene', groupApiId: 'other-room', active: false},
+  ];
+  const choices = h.root.roomSceneChoices(room);
+  assert.equal(choices.length, 6);
+  assert.equal(choices[0].id, 'a');
+  assert.equal(choices.filter(choice => choice.name === 'Read').length, 1);
+  assert.equal(choices.filter(choice => choice.name === 'Sunset').length, 2);
+  assert.ok(!choices.some(choice => choice.id === 'elsewhere'));
+  h.root.applySceneChoice('4', choices[0]);
+  assert.equal(h.actionProc.command[5], 'recall-scene');
+  assert.equal(h.actionProc.command[6], 'a');
+  assert.equal(h.actionProc.command[7], room.controlId);
+  completeAction(h);
+  assert.equal(h.root.sceneStatus, 'Applied Sunset');
+  h.root.applySceneChoice('4', choices.find(choice => choice.preset));
+  assert.equal(h.actionProc.command[5], 'apply-scene');
+});
+
+test('scene pages stay bounded, filter by name, and clamp after a refresh', () => {
+  const h = harness(); load(h);
+  const room = h.root.roomById('4'); room.apiId = 'room';
+  h.root.scenes = Array.from({length: 25}, (_, i) => ({id: 'id' + i, name: 'Saved ' + i, groupApiId: 'room', active: false}));
+  assert.equal(h.root.roomSceneCount(room), 29);
+  assert.equal(h.root.roomScenePage(room).length, 6);
+  h.root.changeScenePage(room, 999);
+  assert.equal(h.root.roomScenePage(room).length, 5);
+  h.root.setSceneQuery('4', 'saved 24');
+  assert.equal(h.root.roomScenePageIndex(room), 0);
+  assert.equal(h.root.roomScenePage(room)[0].id, 'id24');
+  h.root.setSceneQuery('4', 'no match');
+  assert.equal(h.root.roomScenePage(room).length, 0);
+  h.root.setSceneQuery('4', '');
+  h.root.changeScenePage(room, 3);
+  h.root.scenes = [];
+  assert.equal(h.root.roomScenePageIndex(room), 0);
+  assert.equal(h.root.roomScenePage(room).length, 4);
+});
+
+test('fetch waits for stderr and distinguishes diagnostics while preserving the last snapshot', () => {
+  for (const code of ['auth', 'tls', 'timeout', 'response', 'connection']) {
+    const h = harness(); load(h);
+    const oldLights = h.root.lightsById;
+    h.root.refresh(); h.flush();
+    Object.assign(h.stateProc, {fetchOutput: '', fetchOutputFinished: true, fetchExited: true, fetchExitCode: 1});
+    h.root.tryCompleteFetch(h.stateProc);
+    assert.equal(h.root.pendingFetches, 1);
+    Object.assign(h.stateProc, {fetchErrorFinished: true, fetchError: JSON.stringify({error: {code, message: 'secret raw response'}})});
+    h.root.tryCompleteFetch(h.stateProc);
+    assert.equal(h.root.fetchDiagnostic.code, code);
+    assert.equal(h.root.lightsById, oldLights);
+    assert.ok(!JSON.stringify(h.root.fetchDiagnostic).includes('secret'));
+    h.root.refresh(); h.flush();
+    Object.assign(h.stateProc, {fetchOutput: snapshot(), fetchOutputFinished: true, fetchErrorFinished: true, fetchExited: true, fetchExitCode: 0});
+    h.root.tryCompleteFetch(h.stateProc);
+    assert.equal(h.root.fetchDiagnostic, null);
+  }
+});
+
+test('watchdog and malformed successful output produce distinct diagnostics', () => {
+  const h = harness(); load(h);
+  assert.equal(h.HueApi.connectionDiagnostic('', 124, false).code, 'timeout');
+  assert.equal(h.HueApi.connectionDiagnostic('', 137, false).code, 'timeout');
+  h.root.refresh(); h.flush();
+  Object.assign(h.stateProc, {fetchOutput: '{}', fetchOutputFinished: true, fetchErrorFinished: true, fetchExited: true, fetchExitCode: 0});
+  h.root.tryCompleteFetch(h.stateProc);
+  assert.equal(h.root.fetchDiagnostic.code, 'response');
+  h.root.applyScene('4', 'Relax');
+  completeAction(h, 1, JSON.stringify({error: {code: 'tls'}}));
+  assert.match(h.root.actionError, /TLS connection failed/);
 });

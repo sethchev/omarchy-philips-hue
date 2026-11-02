@@ -64,6 +64,8 @@ def main(argv: list[str]) -> int:
     client = HueClient()
     if operation == "get-scenes":
         print(json.dumps(client.get_scenes()))
+    elif operation == "recall-scene" and len(argv) >= 4:
+        client.recall_scene(argv[2], argv[3])
     elif operation == "apply-scene" and len(argv) >= 3:
         room_id = argv[3] if len(argv) >= 4 else None
         applied, total = client.apply_prebuilt_scene(argv[2], room_id)
@@ -93,12 +95,23 @@ def main(argv: list[str]) -> int:
     return 0
 
 
-if __name__ == "__main__":
+def run(argv: list[str]) -> int:
+    structured = len(argv) > 1 and argv[-1] == "--json-errors"
+    if structured:
+        argv = argv[:-1]
     try:
         with operation_deadline():
-            raise SystemExit(main(sys.argv))
+            return main(argv)
     except (DeadlineExceeded, HueError, json.JSONDecodeError, ValueError) as error:
-        if len(sys.argv) >= 2 and sys.argv[1] in ("theme-sync", "sync-room"):
+        code = "timeout" if isinstance(error, DeadlineExceeded) else getattr(error, "code", "request")
+        if len(argv) >= 2 and argv[1] in ("theme-sync", "sync-room"):
             secure_log("theme sync failed: %s" % error)
-        print("Hue error: %s" % error, file=sys.stderr)
-        raise SystemExit(1)
+        if structured:
+            print(json.dumps({"error": {"code": code, "message": str(error)}}), file=sys.stderr)
+        else:
+            print("Hue error: %s" % error, file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(run(sys.argv))

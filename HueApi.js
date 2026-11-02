@@ -3,6 +3,7 @@ var API = Qt.resolvedUrl("hue-api.py").toString().replace("file://", "")
 function apiCmd(args) {
   var cmd = ["python3", API]
   for (var i = 0; i < args.length; i++) cmd.push(String(args[i]))
+  cmd.push("--json-errors")
   return cmd
 }
 
@@ -153,7 +154,7 @@ function parseScenes(text) {
     if (!Object.prototype.hasOwnProperty.call(obj, id)) continue
     var scene = obj[id]
     scenes.push({
-      id: String(scene.id || id),
+      id: String(scene.api_id || scene.id || id),
       name: String(scene.name || "Scene"),
       groupApiId: String(scene.group_api_id || scene.group || ""),
       active: scene.active === true
@@ -290,4 +291,49 @@ function actionReplaceKey(command) {
   var keys = Object.keys(body).sort().join(",")
   if (keys !== "bri" && keys !== "ct" && keys !== "hue,sat") return ""
   return command[2] + ":" + command[3] + ":" + keys
+}
+
+
+function connectionDiagnostic(stderr, exitCode, invalidSnapshot) {
+  var code = "connection"
+  if (exitCode === 124 || exitCode === 137) code = "timeout"
+  else if (invalidSnapshot) code = "response"
+  else {
+    var payload = parseJsonObject(stderr)
+    if (payload && isObject(payload.error)) code = String(payload.error.code || "request")
+    else code = "request"
+  }
+  var labels = {
+    auth: ["Authentication failed", "Re-pair the bridge to renew access."],
+    tls: ["TLS connection failed", "Check bridge identity and the system clock."],
+    timeout: ["Bridge timed out", "Check the bridge and network, then retry."],
+    response: ["Invalid bridge response", "Retry; if it persists, check bridge firmware."],
+    connection: ["Bridge unreachable", "Check bridge power, network, and configured IP."],
+    request: ["Hue command failed", "Refresh and try again."]
+  }
+  if (!Object.prototype.hasOwnProperty.call(labels, code)) code = "request"
+  return { code: code, label: labels[code][0], hint: labels[code][1] }
+}
+
+function roomSceneChoices(room, scenes, presets, query) {
+  var choices = []
+  var names = {}
+  for (var i = 0; i < scenes.length; i++) {
+    var scene = scenes[i]
+    if (scene.groupApiId !== room.apiId) continue
+    choices.push({ id: scene.id, name: scene.name, active: scene.active, preset: false })
+    names[scene.name.trim().toLowerCase()] = true
+  }
+  choices.sort(function(a, b) {
+    if (a.active !== b.active) return a.active ? -1 : 1
+    return a.name.localeCompare(b.name) || a.id.localeCompare(b.id)
+  })
+  for (var j = 0; j < presets.length; j++) {
+    var name = presets[j]
+    if (!Object.prototype.hasOwnProperty.call(names, name.trim().toLowerCase())) {
+      choices.push({ id: "preset:" + name, name: name, active: false, preset: true })
+    }
+  }
+  var needle = String(query || "").trim().toLowerCase()
+  return needle ? choices.filter(function(scene) { return scene.name.toLowerCase().indexOf(needle) !== -1 }) : choices
 }
