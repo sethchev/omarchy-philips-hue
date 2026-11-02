@@ -10,7 +10,7 @@ Omarchy / Quickshell bar widget for controlling Philips Hue lights over the brid
 
 - Bar icon (lightbulb) that opens a control panel
 - Toggle all rooms, individual rooms, or single lights
-- Per-room Scenes dropdown with Relax, Read, Natural Light, and Tv Mode presets; existing bridge scenes are reused and missing presets are created automatically
+- Compact per-room scene browser for saved bridge scenes and four built-in presets; six tiles per page, with search for longer lists
 - Every room and light row is tinted with the bulb's current color
   (hue/sat, color temperature, or XY as reported by the bridge)
 - Per-room brightness slider for dimming or brightening every light in a room together
@@ -21,7 +21,8 @@ Omarchy / Quickshell bar widget for controlling Philips Hue lights over the brid
 - Favorite rooms stay pinned at the top of the panel; use the star beside a room
   (favorites are stored in `hue-theme.json`)
 - Preview the active theme on an opted-in room immediately from its expanded controls
-- Bridge failures and unreachable lights are shown in the panel, with the last
+- Authentication, TLS, timeout, and invalid-response failures have distinct labels
+  and short recovery hints; unreachable lights are shown separately, with the last
   successful refresh time and a manual retry; polling backs off while the bridge
   is unreachable and pauses while the panel is closed
 - State refreshes are serialized and validate command output before updating the
@@ -85,7 +86,15 @@ if the key was revoked or the bridge was reset or replaced.
 
 ## Scenes
 
-Open a room in the panel, expand its **Scenes** menu, and choose one of four built-in presets for that room:
+Open a room in the panel and expand **Scenes** to browse its saved bridge scenes
+alongside any missing built-in presets. Active saved scenes appear first. The
+browser stays collapsed until opened and shows at most six tiles in two columns;
+use the arrows for more scenes, or search by name when there are more than six.
+Long names are shortened on tiles; hover or keyboard-focus a tile for its full
+name. Saved scenes are recalled by ID, so same-named scenes remain distinct and
+scenes from other rooms never appear in this room's list.
+
+The four built-in presets remain available:
 
 - **Relax** — warm, comfortable, lower-brightness white
 - **Read** — brighter warm white for reading
@@ -97,6 +106,23 @@ that room/zone and recalls it only there. If the bridge does not already have th
 for a room, the plugin creates a room-scoped scene from the built-in recipe and
 then recalls it. This keeps existing Hue app scenes intact while filling in
 missing presets such as Natural Light.
+
+Connection failures use the existing panel status and a short hint, with no
+separate diagnostics view:
+
+| Status | Suggested next step |
+| --- | --- |
+| Authentication failed | Re-pair the bridge to renew access |
+| TLS connection failed | Check bridge identity and the system clock |
+| Bridge timed out | Check the bridge and network, then retry |
+| Invalid bridge response | Retry; check firmware if the problem persists |
+| Bridge unreachable | Check power, network, and the configured IP |
+
+The last complete snapshot stays visible during failures. **Retry now** and
+polling backoff continue to work; a successful refresh clears the connection
+error. Action failures use the same categories. The panel requests structured
+errors with `--json-errors`; direct CLI commands keep their readable text errors.
+Diagnostic labels never display raw bridge response bodies or transport URLs.
 
 ## Syncing lights with the omarchy theme
 
@@ -303,6 +329,10 @@ python3 -B -m unittest discover -s tests -v
 node --test tests/test_panel.js
 bash -n pair.sh cleanup.sh theme-sync/45-hue.sh theme-sync/enable-theme-sync.sh
 ```
+
+The optional offscreen QML smoke test uses installed Quickshell and Omarchy UI
+modules, with an isolated home and fixture scenes. It checks the compact height
+budget, pagination, search, and empty results; it skips when those tools are absent.
 
 Node.js is needed only for the development tests. The panel tests execute its
 JavaScript functions with mocked process and timer boundaries; neither suite

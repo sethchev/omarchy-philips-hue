@@ -47,6 +47,13 @@ class ThemeSyncTests(unittest.TestCase):
         self.assertEqual(self.client.put_group.call_count, 2)
         self.assertEqual(self.client.put_light.call_count, 1)
 
+    def test_partial_sync_preserves_authentication_diagnostic(self):
+        self.client.put_group.side_effect = [hue_client.HueError('access denied', 'auth'), None]
+        with self.assertRaises(hue_client.HueError) as raised:
+            hue_client.theme_sync()
+        self.assertEqual(raised.exception.code, 'auth')
+        self.assertEqual(self.client.put_group.call_count, 2)
+
     def test_scene_failure_does_not_skip_remaining_bulbs(self):
         self.read_theme_config.return_value = {'scene': True}
         self.client.put_light.side_effect = [hue_client.HueError('offline'), None, None]
