@@ -273,6 +273,25 @@ The panel, Python client, pairing, cleanup, and theme-sync installer honor
 `~/.local/state` when unset or empty. Theme settings must be a JSON object with
 boolean room overrides; malformed settings are rejected instead of overwritten.
 
+Pending brightness, temperature, and color updates replace only an adjacent
+pending update to the same target and property. In-flight writes, toggles,
+scenes, and settings retain their order. Scene application reuses one snapshot,
+and v2 color writes reuse the snapshot's gamut when available.
+
+Fixture measurements before and after these optimizations:
+
+| Operation | Before | After |
+| --- | ---: | ---: |
+| Apply existing v1 preset: GET requests | 4 | 3 |
+| Apply existing v2 preset: GET requests | 2 | 1 |
+| 100 brightness updates queued before the first completes: helper launches | 100 | 2 |
+| v2 color write with known gamut: GET requests | 1 | 0 |
+
+Each scene/color operation still sends one PUT. These are isolated request and
+process counts, not claims about real bridge latency. Reproduce scene counts
+with `python3 -B tests/benchmark_hue.py`; the panel regression suite checks the
+burst counts and ordering barriers.
+
 ## Development checks
 
 Run the Python client/pairing tests and the panel state regression tests:

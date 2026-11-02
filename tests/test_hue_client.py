@@ -223,6 +223,22 @@ class HueClientTests(unittest.TestCase):
         self.assertEqual(calls[1][1], "/grouped_light/" + V2_RESOURCES[2]["id"])
         self.assertAlmostEqual(calls[1][2]["dimming"]["brightness"], 50.0, delta=0.1)
 
+    def test_color_write_reuses_snapshot_gamut_without_an_extra_read(self):
+        client = hue_client.HueClient(self.creds())
+        client._v2_data = mock.Mock(side_effect=AssertionError("Unexpected gamut read"))
+        client._request = mock.Mock(return_value={})
+        client.put_light(V2_RESOURCES[0]["id"], {"hue": 50000, "sat": 254},
+                         {"gamut": V2_RESOURCES[0]["color"]["gamut"]})
+        client._v2_data.assert_not_called()
+        self.assertEqual(client._request.call_count, 1)
+        self.assertEqual(client._request.call_args.args[0], "PUT")
+
+    def test_invalid_supplied_gamut_is_rejected(self):
+        client = hue_client.HueClient(self.creds())
+        with self.assertRaisesRegex(hue_client.HueError, "Invalid light color gamut"):
+            client.put_light(V2_RESOURCES[0]["id"], {"hue": 0, "sat": 254},
+                             {"gamut": {"red": {"x": float('nan'), "y": 0}}})
+
     def test_v2_response_errors_are_not_ignored(self):
         client = hue_client.HueClient(self.creds())
         with self.assertRaises(hue_client.HueError):
@@ -292,6 +308,7 @@ class HueClientTests(unittest.TestCase):
                 "group_api_id": V2_RESOURCES[1]["id"],
             }
         }
+        client.get_snapshot = lambda: dict(client.get_state(), scenes=client.get_scenes())
         recalled = []
         client.recall_scene = lambda sid, group_id=None: recalled.append((sid, group_id))
         client._create_scene = mock.Mock()
@@ -303,6 +320,7 @@ class HueClientTests(unittest.TestCase):
         client = hue_client.HueClient(self.creds())
         client.get_state = lambda: client._normalize_v2(V2_RESOURCES)
         client.get_scenes = lambda: {}
+        client.get_snapshot = lambda: dict(client.get_state(), scenes=client.get_scenes())
         created_id = "55555555-5555-4555-8555-555555555555"
         client._create_scene = mock.Mock(return_value=created_id)
         recalled = []
@@ -319,11 +337,17 @@ class HueClientTests(unittest.TestCase):
         state["groups"]["5"] = other_room
         client.get_state = lambda: state
         client.get_scenes = lambda: {}
+        client.get_snapshot = lambda: dict(client.get_state(), scenes=client.get_scenes())
         client._create_scene = mock.Mock(return_value="55555555-5555-4555-8555-555555555555")
         client.recall_scene = mock.Mock()
         self.assertEqual(client.apply_prebuilt_scene("Read", "4"), (1, 1))
         self.assertEqual(client._create_scene.call_args.args[1], "4")
         client.recall_scene.assert_called_once()
+
+    def test_scene_application_read_counts(self):
+        from benchmark_hue import scene_requests
+        self.assertEqual(scene_requests("v1"), {"reads": 3, "writes": 1})
+        self.assertEqual(scene_requests("v2"), {"reads": 1, "writes": 1})
 
     def test_secure_json_write_is_private_and_atomic(self):
         with tempfile.TemporaryDirectory() as directory:

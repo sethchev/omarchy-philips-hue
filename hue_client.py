@@ -6,6 +6,7 @@ from __future__ import annotations
 import colorsys
 import json
 import ipaddress
+import math
 import os
 import re
 import socket
@@ -180,7 +181,10 @@ def _gamut_points(gamut):
     if not isinstance(gamut, dict):
         return None
     try:
-        return tuple((float(gamut[name]["x"]), float(gamut[name]["y"])) for name in ("red", "green", "blue"))
+        points = tuple((float(gamut[name]["x"]), float(gamut[name]["y"])) for name in ("red", "green", "blue"))
+        if all(math.isfinite(value) and 0 <= value <= 1 for point in points for value in point):
+            return points
+        return None
     except (KeyError, TypeError, ValueError):
         return None
 
@@ -475,6 +479,8 @@ class HueClient:
         if self.api_version == "v1":
             return self._request("PUT", "/lights/%s/state" % light_id, body)
         gamut = (resource or {}).get("gamut")
+        if gamut and _gamut_points(gamut) is None:
+            raise HueError("Invalid light color gamut")
         if ("hue" in body or "sat" in body) and not gamut:
             data = self._v2_data("/light/%s" % light_id)
             gamut = ((data[0].get("color") or {}).get("gamut") if data else None)
@@ -637,8 +643,8 @@ class HueClient:
 
     def apply_prebuilt_scene(self, name: str, room_id: str | None = None) -> tuple[int, int]:
         recipe = self._prebuilt_scene(name)
-        state = self.get_state()
-        scenes = self.get_scenes()
+        state = self.get_snapshot()
+        scenes = state["scenes"]
         applied = 0
         targets = [(group_id, group) for group_id, group in state["groups"].items()
                    if group.get("type") in ("Room", "Zone") and group.get("lights")

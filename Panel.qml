@@ -406,7 +406,9 @@ Panel {
     var light = root.lightById(lightId)
     if (!light) return
     root.patchLightColor(lightId, hue, sat)
-    root.runAction(HueApi.apiCmd(["put-light", light.apiId, JSON.stringify({ hue: hue, sat: sat })]))
+    var args = ["put-light", light.apiId, JSON.stringify({ hue: hue, sat: sat })]
+    if (root.config.apiVersion === "v2" && HueApi.isObject(light.gamut)) args.push(JSON.stringify(light.gamut))
+    root.runAction(HueApi.apiCmd(args))
   }
 
   function toggleAll(on) {
@@ -431,7 +433,11 @@ Panel {
     root.stateRevision++
     root.actionError = ""
     var id = root.stateRevision
-    root.actionQueue.push({ id: id, command: command, context: context || {} })
+    var action = { id: id, command: command, context: context || {}, replaceKey: HueApi.actionReplaceKey(command) }
+    var last = root.actionQueue.length - 1
+    if (last >= 0 && action.replaceKey && root.actionQueue[last].replaceKey === action.replaceKey) {
+      root.actionQueue[last] = action
+    } else root.actionQueue.push(action)
     drainActionQueue()
     return id
   }

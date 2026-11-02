@@ -279,3 +279,15 @@ function roomColorLightCount(room) {
   }
   return n
 }
+
+
+// Only adjacent pending scalar updates may replace each other. Toggles,
+// scenes, config writes, and updates to other properties act as barriers.
+function actionReplaceKey(command) {
+  if (command[2] !== "put-light" && command[2] !== "put-group") return ""
+  var body = parseJsonObject(command[4])
+  if (!isObject(body)) return ""
+  var keys = Object.keys(body).sort().join(",")
+  if (keys !== "bri" && keys !== "ct" && keys !== "hue,sat") return ""
+  return command[2] + ":" + command[3] + ":" + keys
+}

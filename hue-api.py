@@ -75,7 +75,13 @@ def main(argv: list[str]) -> int:
     elif operation == "get-groups":
         print(json.dumps(client.get_groups()))
     elif operation == "put-light" and len(argv) >= 4:
-        client.put_light(argv[2], json.loads(argv[3]))
+        resource = None
+        if len(argv) >= 5:
+            gamut = json.loads(argv[4])
+            if not isinstance(gamut, dict):
+                raise HueError("Light gamut must be an object")
+            resource = {"gamut": gamut}
+        client.put_light(argv[2], json.loads(argv[3]), resource)
     elif operation == "put-group" and len(argv) >= 4:
         client.put_group(argv[2], json.loads(argv[3]))
     elif operation == "put-all" and len(argv) >= 4:
