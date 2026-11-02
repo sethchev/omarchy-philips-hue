@@ -33,6 +33,14 @@ import qs.Commons as Commons
 import "HueApi.js" as HueApi
 Window {
   id: window
+  function findSearch(item) {
+    if (item.objectName === "sceneSearch") return item
+    for (var i = 0; i < item.children.length; i++) {
+      var found = findSearch(item.children[i])
+      if (found) return found
+    }
+    return null
+  }
   width: 380; height: 320; visible: true
   Rectangle { anchors.fill: parent; color: "#18202a" }
   QtObject {
@@ -68,7 +76,17 @@ Window {
         root.setSceneQuery("4", "Golden")
       } else if (phase === 3) {
         if (browser.choiceCount !== 1) { Qt.exit(6); return }
-        root.setSceneQuery("4", "")
+        // Another Hue client removes the matching scene, leaving six choices.
+        root.scenes = root.scenes.slice(0, 2)
+      } else if (phase === 4) {
+        var search = window.findSearch(browser)
+        if (browser.choiceCount !== 0 || !search || !search.visible || search.text !== "Golden") { Qt.exit(8); return }
+        // Clear through the actual input and its edit handler.
+        search.text = ""
+        search.textEdited()
+      } else if (phase === 5) {
+        var search = window.findSearch(browser)
+        if (browser.choiceCount !== 6 || browser.pageIndex !== 0 || search.visible) { Qt.exit(9); return }
         root.scenes = []
       } else {
         if (browser.choiceCount !== 4 || browser.pageIndex !== 0) { Qt.exit(7); return }

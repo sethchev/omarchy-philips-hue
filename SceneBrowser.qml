@@ -14,6 +14,7 @@ Column {
 
   BorderSurface {
     visible: root.controller.roomSceneCount(root.room) > root.controller.scenePageSize
+      || (root.controller.sceneQueries[root.room.id] || "") !== ""
     width: parent.width
     height: Style.space(34)
     radius: Style.cornerRadius
@@ -22,6 +23,7 @@ Column {
 
     TextInput {
       id: search
+      objectName: "sceneSearch"
       anchors.fill: parent
       anchors.margins: Style.space(8)
       text: root.controller.sceneQueries[root.room.id] || ""
