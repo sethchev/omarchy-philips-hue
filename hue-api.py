@@ -9,12 +9,14 @@ import json
 import re
 import sys
 
+from hue_transport import DeadlineExceeded, operation_deadline
+
 from hue_client import (
     CONFIG_FILE,
     HueClient,
     HueError,
     migrate_api,
-    read_json,
+    read_theme_config,
     secure_log,
     theme_sync,
     write_json_secure,
@@ -28,7 +30,7 @@ def _config_map(key: str, raw: str):
     for resource_id, enabled in settings.items():
         if not re.fullmatch(r"[0-9A-Za-z_-]{1,64}", str(resource_id)) or not isinstance(enabled, bool):
             raise HueError("Invalid room setting")
-    config = read_json(CONFIG_FILE, {}) or {}
+    config = read_theme_config()
     config[key] = settings
     write_json_secure(CONFIG_FILE, config)
 
@@ -73,7 +75,13 @@ def main(argv: list[str]) -> int:
     elif operation == "get-groups":
         print(json.dumps(client.get_groups()))
     elif operation == "put-light" and len(argv) >= 4:
-        client.put_light(argv[2], json.loads(argv[3]))
+        resource = None
+        if len(argv) >= 5:
+            gamut = json.loads(argv[4])
+            if not isinstance(gamut, dict):
+                raise HueError("Light gamut must be an object")
+            resource = {"gamut": gamut}
+        client.put_light(argv[2], json.loads(argv[3]), resource)
     elif operation == "put-group" and len(argv) >= 4:
         client.put_group(argv[2], json.loads(argv[3]))
     elif operation == "put-all" and len(argv) >= 4:
@@ -87,8 +95,9 @@ def main(argv: list[str]) -> int:
 
 if __name__ == "__main__":
     try:
-        raise SystemExit(main(sys.argv))
-    except (HueError, json.JSONDecodeError, ValueError) as error:
+        with operation_deadline():
+            raise SystemExit(main(sys.argv))
+    except (DeadlineExceeded, HueError, json.JSONDecodeError, ValueError) as error:
         if len(sys.argv) >= 2 and sys.argv[1] in ("theme-sync", "sync-room"):
             secure_log("theme sync failed: %s" % error)
         print("Hue error: %s" % error, file=sys.stderr)

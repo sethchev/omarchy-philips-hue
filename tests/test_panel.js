@@ -72,8 +72,8 @@ test('master toggle counts unique lights, includes orphans, and requires every b
   assert.equal(h.root.computeAllLightsOn(), false);
   h.root.toggleAll(true);
   assert.equal(h.root.computeAllLightsOn(), true);
-  assert.equal(h.actionProc.command[2], 'put-all');
-  assert.deepEqual(JSON.parse(h.actionProc.command[3]), ['uuid1', 'uuid2', 'uuid3']);
+  assert.equal(h.actionProc.command[5], 'put-all');
+  assert.deepEqual(JSON.parse(h.actionProc.command[6]), ['uuid1', 'uuid2', 'uuid3']);
   assert.equal(h.root.orphanLights[0].on, true);
 });
 
@@ -91,8 +91,8 @@ test('master toggle uses the bridge-wide service when available', () => {
   const h = harness(); load(h);
   h.root.allControlId = 'bridge-service';
   h.root.toggleAll(false);
-  assert.equal(h.actionProc.command[2], 'put-group');
-  assert.equal(h.actionProc.command[3], 'bridge-service');
+  assert.equal(h.actionProc.command[5], 'put-group');
+  assert.equal(h.actionProc.command[6], 'bridge-service');
   assert.equal(h.root.orphanLights[0].on, false);
 });
 
@@ -100,7 +100,7 @@ test('refresh waits for exit and stdout, commits all resources, keeps picker sta
   const h = harness(); load(h);
   h.root.toggleColorPicker('1');
   h.root.refresh(); h.flush();
-  assert.equal(h.stateProc.command[2], 'get-state');
+  assert.equal(h.stateProc.command[5], 'get-state');
   Object.assign(h.stateProc, {fetchOutput: snapshot(), fetchOutputFinished: true});
   h.root.tryCompleteFetch(h.stateProc);
   assert.equal(h.root.pendingFetches, 1);
@@ -147,9 +147,9 @@ test('actions serialize settings writes before sync and defer refresh until drai
   assert.equal(h.actionProc.command, first);
   assert.equal(h.stateProc.running, false);
   completeAction(h);
-  assert.equal(h.actionProc.command[2], 'write-theme-config');
+  assert.equal(h.actionProc.command[5], 'write-theme-config');
   completeAction(h);
-  assert.equal(h.actionProc.command[2], 'sync-room');
+  assert.equal(h.actionProc.command[5], 'sync-room');
   completeAction(h);
   assert.equal(h.root.currentAction, null);
   assert.equal(h.resyncTimer.count, 1);
@@ -207,4 +207,70 @@ test('action failure triggers a refresh that replaces optimistic state', () => {
   h.root.tryCompleteFetch(h.stateProc);
   assert.equal(h.root.lightsById['2'].on, false);
   assert.equal(h.root.actionError, 'Hue error: failed');
+});
+
+
+test('timed-out commands release the queue and report a useful error', () => {
+  const h = harness(); load(h);
+  h.root.toggleLight('1', false);
+  assert.deepEqual(Array.from(h.actionProc.command.slice(0, 3)), ['timeout', '--kill-after=2s', '30s']);
+  h.root.toggleLight('2', true);
+  completeAction(h, 124);
+  assert.match(h.root.actionError, /timed out/);
+  assert.equal(h.actionProc.command[6], 'uuid2');
+  completeAction(h);
+  assert.equal(h.root.currentAction, null);
+  assert.equal(h.resyncTimer.count, 1);
+});
+
+
+test('100 pending brightness changes launch only the first and latest helper', t => {
+  const h = harness(); load(h);
+  for (let i = 1; i <= 100; i++) h.root.setBrightness('1', i);
+  assert.equal(h.root.actionQueue.length, 1);
+  assert.equal(JSON.parse(h.actionProc.command[7]).bri, 1);
+  completeAction(h);
+  assert.equal(JSON.parse(h.actionProc.command[7]).bri, 100);
+  completeAction(h);
+  assert.equal(h.root.currentAction, null);
+  assert.equal(h.root.lightsById['1'].bri, 100);
+  t.diagnostic('Fixture burst: 100 brightness updates -> 2 helper launches (baseline: 100)');
+});
+
+test('toggles, scenes, targets and properties preserve queue ordering', () => {
+  const h = harness(); load(h);
+  h.root.setBrightness('1', 10);
+  h.root.setBrightness('1', 20);
+  h.root.toggleLight('1', false);
+  h.root.setBrightness('1', 30);
+  h.root.setBrightness('2', 40);
+  h.root.lightsById['1'].ctMin = 153;
+  h.root.lightsById['1'].ctMax = 500;
+  h.root.setColorTemperature('1', 250);
+  h.root.applyScene('4', 'Read');
+  assert.equal(h.root.actionQueue.length, 6);
+  const executed = [];
+  while (h.root.currentAction) {
+    executed.push(Array.from(h.root.currentAction.command.slice(2)));
+    completeAction(h);
+  }
+  assert.deepEqual(executed.map(args => args[0]), [
+    'put-light', 'put-light', 'put-light', 'put-light', 'put-light', 'put-light', 'apply-scene'
+  ]);
+  assert.deepEqual(executed.slice(0, 6).map(args => JSON.parse(args[2])), [
+    {bri: 10}, {bri: 20}, {on: false}, {bri: 30}, {bri: 40}, {ct: 250}
+  ]);
+});
+
+test('color writes pass v2 snapshot gamut while retaining v1 gamut compatibility', () => {
+  const h = harness(); load(h);
+  const gamut = {red: {x: 0.7, y: 0.3}, green: {x: 0.17, y: 0.7}, blue: {x: 0.15, y: 0.06}};
+  h.root.lightsById['1'].gamut = gamut;
+  h.root.setLightColor('1', 50000, 254);
+  assert.deepEqual(JSON.parse(h.actionProc.command[8]), gamut);
+  completeAction(h);
+  h.root.config.apiVersion = 'v1';
+  h.root.lightsById['1'].gamut = [[0.7, 0.3], [0.17, 0.7], [0.15, 0.06]];
+  h.root.setLightColor('1', 1000, 200);
+  assert.equal(h.actionProc.command.length, 8);
 });

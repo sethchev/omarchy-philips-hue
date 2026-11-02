@@ -243,7 +243,8 @@ plugin so no auth token is left behind.
   Philips' hosted lookup `discovery.meethue.com`. Pass an IP directly to
   `pair.sh` to skip auto-discovery entirely.
 - If `bridgeId` is missing (e.g. from an older config), the panel warns
-  "TLS verification disabled" — re-run `pair.sh` to restore full
+  "Bridge hostname verification unavailable" — CA verification remains enabled;
+  re-run `pair.sh` to restore full
   certificate verification.
 - Existing installations default to the classic v1 local API for backward
   compatibility. New pairings prefer CLIP v2. Room and light `id_v1` values
@@ -251,6 +252,47 @@ plugin so no auth token is left behind.
   survive migration.
 - Credentials are stored per-user in `~/.local/state/omarchy/settings/hue.json`;
   keep that file out of version control.
+
+Helper commands have a 25-second total operation deadline, in addition to the
+five-second socket timeout. The panel also uses a 30-second process watchdog
+(with a two-second forced-kill grace period), so timed-out actions release the
+queue and reconcile state. Pairing/discovery requests each have an eight-second
+total deadline. Pairing log writes reject symlinks and nonregular files.
+
+Theme sync processes rooms before zones, using stable group IDs within each
+kind. Each bulb is assigned to one selected group; overlapping zones only write
+their remaining bulbs, and fully covered groups are skipped. During automatic
+sync, a disabled group's bulbs are protected from writes through other zones.
+Explicit room previews remain scoped to that room. Individual bulb or group
+failures do not stop other targets; partial failures are logged and return an
+error after the remaining targets have been attempted. A transition of `0`
+applies immediately. Brightness and power settings also apply to white-only
+lights, including bulbs remaining in overlapping zones; color assignment is
+limited to color-capable bulbs. Brightness is sent only where dimming is supported.
+
+The panel, Python client, pairing, cleanup, and theme-sync installer honor
+`XDG_CONFIG_HOME` and `XDG_STATE_HOME`, falling back to `~/.config` and
+`~/.local/state` when unset or empty. Theme settings must be a JSON object with
+boolean room overrides; malformed settings are rejected instead of overwritten.
+
+Pending brightness, temperature, and color updates replace only an adjacent
+pending update to the same target and property. In-flight writes, toggles,
+scenes, and settings retain their order. Scene application reuses one snapshot,
+and v2 color writes reuse the snapshot's gamut when available.
+
+Fixture measurements before and after these optimizations:
+
+| Operation | Before | After |
+| --- | ---: | ---: |
+| Apply existing v1 preset: GET requests | 4 | 3 |
+| Apply existing v2 preset: GET requests | 2 | 1 |
+| 100 brightness updates queued before the first completes: helper launches | 100 | 2 |
+| v2 color write with known gamut: GET requests | 1 | 0 |
+
+Each scene/color operation still sends one PUT. These are isolated request and
+process counts, not claims about real bridge latency. Reproduce scene counts
+with `python3 -B tests/benchmark_hue.py`; the panel regression suite checks the
+burst counts and ordering barriers.
 
 ## Development checks
 
