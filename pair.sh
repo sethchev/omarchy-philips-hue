@@ -20,29 +20,22 @@ case "$REQUESTED_API" in
   *) err "PHILIPS_HUE_API_VERSION must be auto, v1, or v2."; exit 1 ;;
 esac
 
-ensure_log_perms() {
-  python3 -c "
-import os
+append_pair_log() {
+  # Pass paths as data and keep validation and append on the same descriptor.
+  python3 -c '
+import os, stat, sys
 try:
-    fd = os.open('''$LOG_FILE''', os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
     try:
-        os.fchmod(fd, 0o600)
-    except (OSError, ValueError):
-        pass
-    os.close(fd)
-except FileExistsError:
-    try:
-        fd = os.open('''$LOG_FILE''', os.O_WRONLY | os.O_NOFOLLOW)
-        os.fchmod(fd, 0o600)
+        if stat.S_ISREG(os.fstat(fd).st_mode):
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "a", closefd=False) as handle:
+                handle.write(sys.stdin.read(1048576))
+    finally:
         os.close(fd)
-    except (OSError, ValueError):
-        try:
-            os.remove('''$LOG_FILE''')
-        except OSError:
-            pass
-        fd = os.open('''$LOG_FILE''', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        os.close(fd)
-" 2>/dev/null || true
+except OSError:
+    pass
+' "$LOG_FILE" 2>/dev/null || true
 }
 
 valid_ip() {
@@ -76,17 +69,18 @@ discover_bridge_cloud() {
   ip=$(HUE_PLUGIN_DIR="$PLUGIN_DIR" python3 - <<'PY' 2>/dev/null || true
 import json, os, sys
 sys.path.insert(0, os.environ["HUE_PLUGIN_DIR"])
-from hue_transport import no_redirect_opener
-with no_redirect_opener().open("https://discovery.meethue.com/", timeout=5) as response:
-    raw = response.read(1048577)
-    if len(raw) > 1048576:
-        raise SystemExit(1)
-    data = json.loads(raw.decode("utf-8", "replace"))
-for item in data if isinstance(data, list) else []:
-    ip = item.get("internalipaddress", "") if isinstance(item, dict) else ""
-    if ip:
-        print(ip)
-        break
+from hue_transport import no_redirect_opener, operation_deadline
+with operation_deadline(8):
+    with no_redirect_opener().open("https://discovery.meethue.com/", timeout=5) as response:
+        raw = response.read(1048577)
+        if len(raw) > 1048576:
+            raise SystemExit(1)
+        data = json.loads(raw.decode("utf-8", "replace"))
+    for item in data if isinstance(data, list) else []:
+        ip = item.get("internalipaddress", "") if isinstance(item, dict) else ""
+        if ip:
+            print(ip)
+            break
 PY
   )
   [[ -n "$ip" ]] || return 1
@@ -98,23 +92,24 @@ fetch_bridge_id() {
   bridge_id=$(CACERT="$CACERT" TARGET_IP="$ip" HUE_PLUGIN_DIR="$PLUGIN_DIR" python3 - <<'PY' 2>/dev/null || true
 import json, os, ssl, sys
 sys.path.insert(0, os.environ["HUE_PLUGIN_DIR"])
-from hue_transport import no_redirect_opener
-cacert = os.environ["CACERT"]
-target = os.environ["TARGET_IP"]
-ctx = ssl.create_default_context(cafile=cacert)
-ctx.check_hostname = False
-try:
-    with no_redirect_opener(ctx).open("https://%s/api/config" % target, timeout=5) as r:
-        raw = r.read(1048577)
-        if len(raw) > 1048576:
-            raise SystemExit(1)
-        d = json.loads(raw.decode("utf-8", "replace"))
-        bid = d.get("bridgeid", "")
-        bid = bid.lower() if bid else ""
-        if all(c in "0123456789abcdef" for c in bid) and len(bid) == 16:
-            print(bid)
-except Exception:
-    pass
+from hue_transport import no_redirect_opener, operation_deadline
+with operation_deadline(8):
+    cacert = os.environ["CACERT"]
+    target = os.environ["TARGET_IP"]
+    ctx = ssl.create_default_context(cafile=cacert)
+    ctx.check_hostname = False
+    try:
+        with no_redirect_opener(ctx).open("https://%s/api/config" % target, timeout=5) as r:
+            raw = r.read(1048577)
+            if len(raw) > 1048576:
+                raise SystemExit(1)
+            d = json.loads(raw.decode("utf-8", "replace"))
+            bid = d.get("bridgeid", "")
+            bid = bid.lower() if bid else ""
+            if all(c in "0123456789abcdef" for c in bid) and len(bid) == 16:
+                print(bid)
+    except Exception:
+        pass
 PY
   )
   printf '%s\n' "$bridge_id"
@@ -126,27 +121,28 @@ probe_v2() {
     python3 - <<'PY' >/dev/null 2>&1
 import json, os, socket, ssl, sys, urllib.request
 sys.path.insert(0, os.environ["HUE_PLUGIN_DIR"])
-from hue_transport import no_redirect_opener
-ip = os.environ["TARGET_IP"]
-hostname = os.environ["BRIDGE_ID"]
-key = os.environ["HUE_APPLICATION_KEY"]
-original = socket.getaddrinfo
-def resolve(host, port, *args, **kwargs):
-    if host == hostname:
-        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, port))]
-    return original(host, port, *args, **kwargs)
-socket.getaddrinfo = resolve
-context = ssl.create_default_context(cafile=os.environ["CACERT"])
-request = urllib.request.Request(
-    "https://%s/clip/v2/resource/bridge" % hostname,
-    headers={"hue-application-key": key, "Accept": "application/json"})
-with no_redirect_opener(context).open(request, timeout=5) as response:
-    raw = response.read(1048577)
-    if len(raw) > 1048576:
+from hue_transport import no_redirect_opener, operation_deadline
+with operation_deadline(8):
+    ip = os.environ["TARGET_IP"]
+    hostname = os.environ["BRIDGE_ID"]
+    key = os.environ["HUE_APPLICATION_KEY"]
+    original = socket.getaddrinfo
+    def resolve(host, port, *args, **kwargs):
+        if host == hostname:
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, port))]
+        return original(host, port, *args, **kwargs)
+    socket.getaddrinfo = resolve
+    context = ssl.create_default_context(cafile=os.environ["CACERT"])
+    request = urllib.request.Request(
+        "https://%s/clip/v2/resource/bridge" % hostname,
+        headers={"hue-application-key": key, "Accept": "application/json"})
+    with no_redirect_opener(context).open(request, timeout=5) as response:
+        raw = response.read(1048577)
+        if len(raw) > 1048576:
+            raise SystemExit(1)
+        result = json.loads(raw.decode("utf-8", "replace"))
+    if result.get("errors") or not isinstance(result.get("data"), list):
         raise SystemExit(1)
-    result = json.loads(raw.decode("utf-8", "replace"))
-if result.get("errors") or not isinstance(result.get("data"), list):
-    raise SystemExit(1)
 PY
 }
 
@@ -157,28 +153,29 @@ pair() {
     response=$(TARGET_IP="$ip" BRIDGE_ID="$bridge_id" DEVICETYPE="$DEVICETYPE" CACERT="$CACERT" HUE_PLUGIN_DIR="$PLUGIN_DIR" python3 - <<'PY' 2>/dev/null || true
 import json, os, socket, ssl, sys, urllib.request
 sys.path.insert(0, os.environ["HUE_PLUGIN_DIR"])
-from hue_transport import no_redirect_opener
-ip = os.environ["TARGET_IP"]
-hostname = os.environ["BRIDGE_ID"]
-devicetype = os.environ["DEVICETYPE"]
-original = socket.getaddrinfo
-def resolve(host, port, *args, **kwargs):
-    if host == hostname:
-        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, port))]
-    return original(host, port, *args, **kwargs)
-socket.getaddrinfo = resolve
-context = ssl.create_default_context(cafile=os.environ["CACERT"])
-request = urllib.request.Request(
-    "https://%s/api" % hostname,
-    data=json.dumps({"devicetype": devicetype}).encode(),
-    headers={"Content-Type": "application/json"},
-    method="POST",
-)
-with no_redirect_opener(context).open(request, timeout=5) as response:
-    raw = response.read(1048577)
-    if len(raw) > 1048576:
-        raise SystemExit(1)
-    print(raw.decode("utf-8", "replace"))
+from hue_transport import no_redirect_opener, operation_deadline
+with operation_deadline(8):
+    ip = os.environ["TARGET_IP"]
+    hostname = os.environ["BRIDGE_ID"]
+    devicetype = os.environ["DEVICETYPE"]
+    original = socket.getaddrinfo
+    def resolve(host, port, *args, **kwargs):
+        if host == hostname:
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, port))]
+        return original(host, port, *args, **kwargs)
+    socket.getaddrinfo = resolve
+    context = ssl.create_default_context(cafile=os.environ["CACERT"])
+    request = urllib.request.Request(
+        "https://%s/api" % hostname,
+        data=json.dumps({"devicetype": devicetype}).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with no_redirect_opener(context).open(request, timeout=5) as response:
+        raw = response.read(1048577)
+        if len(raw) > 1048576:
+            raise SystemExit(1)
+        print(raw.decode("utf-8", "replace"))
 PY
     )
     ts=$(date +'%Y-%m-%d %H:%M:%S')
@@ -200,7 +197,7 @@ except Exception:
 ")
     printf '%s POST /api devicetype=%s bridge=%s ip=%s -> %s\n' \
       "$ts" "$DEVICETYPE" "$bridge_id" "$ip" "$redacted" \
-      >>"$LOG_FILE" 2>/dev/null || true
+      | append_pair_log
     username=$(python3 -c "
 import json, sys
 try:
@@ -231,7 +228,6 @@ mkdir -p "$STATE_DIR" || {
   exit 1
 }
 
-ensure_log_perms
 
 if [[ -f "$STATE_FILE" ]] && python3 -c "
 import json, os, stat, sys

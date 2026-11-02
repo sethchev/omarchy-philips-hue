@@ -9,6 +9,8 @@ import json
 import re
 import sys
 
+from hue_transport import DeadlineExceeded, operation_deadline
+
 from hue_client import (
     CONFIG_FILE,
     HueClient,
@@ -87,8 +89,9 @@ def main(argv: list[str]) -> int:
 
 if __name__ == "__main__":
     try:
-        raise SystemExit(main(sys.argv))
-    except (HueError, json.JSONDecodeError, ValueError) as error:
+        with operation_deadline():
+            raise SystemExit(main(sys.argv))
+    except (DeadlineExceeded, HueError, json.JSONDecodeError, ValueError) as error:
         if len(sys.argv) >= 2 and sys.argv[1] in ("theme-sync", "sync-room"):
             secure_log("theme sync failed: %s" % error)
         print("Hue error: %s" % error, file=sys.stderr)

@@ -152,7 +152,7 @@ Panel {
     proc.fetchExitCode = -1
     proc.fetchExited = false
     proc.fetchReported = false
-    proc.command = HueApi.apiCmd(args)
+    proc.command = ["timeout", "--kill-after=2s", "30s"].concat(HueApi.apiCmd(args))
     proc.running = true
   }
 
@@ -444,7 +444,7 @@ Panel {
     actionProc.actionOutputFinished = false
     actionProc.actionExited = false
     actionProc.actionExitCode = -1
-    actionProc.command = root.currentAction.command
+    actionProc.command = ["timeout", "--kill-after=2s", "30s"].concat(root.currentAction.command)
     actionProc.running = true
   }
 
@@ -453,7 +453,9 @@ Panel {
     var context = root.currentAction.context
     var failed = actionProc.actionExitCode !== 0
     if (failed) {
-      root.actionError = actionProc.errorOutput.trim() || "Hue command failed. Retrying state refresh."
+      root.actionError = actionProc.actionExitCode === 124 || actionProc.actionExitCode === 137
+        ? "Hue command timed out. Retrying state refresh."
+        : actionProc.errorOutput.trim() || "Hue command failed. Retrying state refresh."
       themeConfigFile.reload()
     }
     if (context.sceneName && root.currentAction.id === root.sceneActionId) {

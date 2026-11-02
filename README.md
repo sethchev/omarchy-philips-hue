@@ -252,6 +252,12 @@ plugin so no auth token is left behind.
 - Credentials are stored per-user in `~/.local/state/omarchy/settings/hue.json`;
   keep that file out of version control.
 
+Helper commands have a 25-second total operation deadline, in addition to the
+five-second socket timeout. The panel also uses a 30-second process watchdog
+(with a two-second forced-kill grace period), so timed-out actions release the
+queue and reconcile state. Pairing/discovery requests each have an eight-second
+total deadline. Pairing log writes reject symlinks and nonregular files.
+
 ## Development checks
 
 Run the Python client/pairing tests and the panel state regression tests:

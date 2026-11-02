@@ -59,6 +59,27 @@ pair 192.0.2.10 001788fffe123456 || exit "$?"
             )
             return result, (fixture / "pair.log").read_text(), int((fixture / "count").read_text())
 
+    def test_pair_log_rejects_symlinks_and_fifos(self):
+        definitions = (ROOT / "pair.sh").read_text().split('mkdir -p "$STATE_DIR"', 1)[0]
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Path(directory)
+            target = fixture / "target"
+            target.write_text("unchanged")
+            log = fixture / "pair.log"
+            script = fixture / "log-test.sh"
+            script.write_text(definitions + '\nLOG_FILE="$PAIR_FIXTURE/pair.log"\nprintf "entry\\n" | append_pair_log\n')
+            env = {**os.environ, "PAIR_FIXTURE": directory}
+            log.symlink_to(target)
+            subprocess.run(["bash", str(script)], env=env, check=True, timeout=3)
+            self.assertEqual(target.read_text(), "unchanged")
+            log.unlink()
+            os.mkfifo(log)
+            subprocess.run(["bash", str(script)], env=env, check=True, timeout=3)
+            log.unlink()
+            subprocess.run(["bash", str(script)], env=env, check=True, timeout=3)
+            self.assertEqual(log.read_text(), "entry\n")
+            self.assertEqual(log.stat().st_mode & 0o777, 0o600)
+
     def test_success_returns_username_and_redacts_log(self):
         result, log, attempts = self.run_pair([json.dumps(SUCCESS)])
         self.assertEqual(result.returncode, 0, result.stderr)

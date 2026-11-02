@@ -72,8 +72,8 @@ test('master toggle counts unique lights, includes orphans, and requires every b
   assert.equal(h.root.computeAllLightsOn(), false);
   h.root.toggleAll(true);
   assert.equal(h.root.computeAllLightsOn(), true);
-  assert.equal(h.actionProc.command[2], 'put-all');
-  assert.deepEqual(JSON.parse(h.actionProc.command[3]), ['uuid1', 'uuid2', 'uuid3']);
+  assert.equal(h.actionProc.command[5], 'put-all');
+  assert.deepEqual(JSON.parse(h.actionProc.command[6]), ['uuid1', 'uuid2', 'uuid3']);
   assert.equal(h.root.orphanLights[0].on, true);
 });
 
@@ -91,8 +91,8 @@ test('master toggle uses the bridge-wide service when available', () => {
   const h = harness(); load(h);
   h.root.allControlId = 'bridge-service';
   h.root.toggleAll(false);
-  assert.equal(h.actionProc.command[2], 'put-group');
-  assert.equal(h.actionProc.command[3], 'bridge-service');
+  assert.equal(h.actionProc.command[5], 'put-group');
+  assert.equal(h.actionProc.command[6], 'bridge-service');
   assert.equal(h.root.orphanLights[0].on, false);
 });
 
@@ -100,7 +100,7 @@ test('refresh waits for exit and stdout, commits all resources, keeps picker sta
   const h = harness(); load(h);
   h.root.toggleColorPicker('1');
   h.root.refresh(); h.flush();
-  assert.equal(h.stateProc.command[2], 'get-state');
+  assert.equal(h.stateProc.command[5], 'get-state');
   Object.assign(h.stateProc, {fetchOutput: snapshot(), fetchOutputFinished: true});
   h.root.tryCompleteFetch(h.stateProc);
   assert.equal(h.root.pendingFetches, 1);
@@ -147,9 +147,9 @@ test('actions serialize settings writes before sync and defer refresh until drai
   assert.equal(h.actionProc.command, first);
   assert.equal(h.stateProc.running, false);
   completeAction(h);
-  assert.equal(h.actionProc.command[2], 'write-theme-config');
+  assert.equal(h.actionProc.command[5], 'write-theme-config');
   completeAction(h);
-  assert.equal(h.actionProc.command[2], 'sync-room');
+  assert.equal(h.actionProc.command[5], 'sync-room');
   completeAction(h);
   assert.equal(h.root.currentAction, null);
   assert.equal(h.resyncTimer.count, 1);
@@ -207,4 +207,18 @@ test('action failure triggers a refresh that replaces optimistic state', () => {
   h.root.tryCompleteFetch(h.stateProc);
   assert.equal(h.root.lightsById['2'].on, false);
   assert.equal(h.root.actionError, 'Hue error: failed');
+});
+
+
+test('timed-out commands release the queue and report a useful error', () => {
+  const h = harness(); load(h);
+  h.root.toggleLight('1', false);
+  assert.deepEqual(Array.from(h.actionProc.command.slice(0, 3)), ['timeout', '--kill-after=2s', '30s']);
+  h.root.toggleLight('2', true);
+  completeAction(h, 124);
+  assert.match(h.root.actionError, /timed out/);
+  assert.equal(h.actionProc.command[6], 'uuid2');
+  completeAction(h);
+  assert.equal(h.root.currentAction, null);
+  assert.equal(h.resyncTimer.count, 1);
 });
