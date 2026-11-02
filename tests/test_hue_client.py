@@ -76,6 +76,13 @@ class HueClientTests(unittest.TestCase):
             "apiVersion": version,
         }
 
+    def test_invalid_credentials_fail_before_any_network_access(self):
+        for changes in ({"bridgeIp": "999.1.1.1"}, {"bridgeId": "other.example"},
+                        {"username": "key/../config"}):
+            with self.subTest(changes=changes):
+                with self.assertRaises(hue_client.HueError):
+                    hue_client.HueClient(dict(self.creds(), **changes))
+
     def test_missing_api_version_remains_v1(self):
         self.assertEqual(hue_client.configured_api_version({}), "v1")
 

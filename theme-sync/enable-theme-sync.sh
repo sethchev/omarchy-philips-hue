@@ -6,8 +6,9 @@ set -euo pipefail
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 HOOK_SRC="$HERE/45-hue.sh"
 CONFIG_SRC="$HERE/hue-theme.json"
-HOOK_DIR="$HOME/.config/omarchy/hooks/theme-set.d"
-CONFIG_DIR="$HOME/.config/omarchy/settings"
+CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+HOOK_DIR="$CONFIG_HOME/omarchy/hooks/theme-set.d"
+CONFIG_DIR="$CONFIG_HOME/omarchy/settings"
 HOOK_DEST="$HOOK_DIR/45-hue.sh"
 CONFIG_DEST="$CONFIG_DIR/hue-theme.json"
 
@@ -31,13 +32,14 @@ if [[ -L "$CONFIG_DEST" ]]; then
   rm "$CONFIG_DEST"
 fi
 if [[ ! -f "$CONFIG_DEST" ]]; then
-  python3 -c "
-import os
-data = open('''$CONFIG_SRC''', 'rb').read()
-fd = os.open('''$CONFIG_DEST''', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-os.write(fd, data)
-os.close(fd)
-"
+  python3 - "$CONFIG_SRC" "$CONFIG_DEST" <<'PYCODE'
+import os, sys
+with open(sys.argv[1], "rb") as source:
+    data = source.read()
+fd = os.open(sys.argv[2], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+with os.fdopen(fd, "wb") as target:
+    target.write(data)
+PYCODE
   echo "Installed $CONFIG_DEST"
 else
   chmod 600 "$CONFIG_DEST"

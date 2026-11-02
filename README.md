@@ -243,7 +243,8 @@ plugin so no auth token is left behind.
   Philips' hosted lookup `discovery.meethue.com`. Pass an IP directly to
   `pair.sh` to skip auto-discovery entirely.
 - If `bridgeId` is missing (e.g. from an older config), the panel warns
-  "TLS verification disabled" — re-run `pair.sh` to restore full
+  "Bridge hostname verification unavailable" — CA verification remains enabled;
+  re-run `pair.sh` to restore full
   certificate verification.
 - Existing installations default to the classic v1 local API for backward
   compatibility. New pairings prefer CLIP v2. Room and light `id_v1` values
@@ -257,6 +258,20 @@ five-second socket timeout. The panel also uses a 30-second process watchdog
 (with a two-second forced-kill grace period), so timed-out actions release the
 queue and reconcile state. Pairing/discovery requests each have an eight-second
 total deadline. Pairing log writes reject symlinks and nonregular files.
+
+Theme sync processes rooms before zones, using stable group IDs within each
+kind. Each bulb is assigned to one selected group; overlapping zones only write
+their remaining bulbs, and fully covered groups are skipped. During automatic
+sync, a disabled group's bulbs are protected from writes through other zones.
+Explicit room previews remain scoped to that room. Individual bulb or group
+failures do not stop other targets; partial failures are logged and return an
+error after the remaining targets have been attempted. A transition of `0`
+applies immediately.
+
+The panel, Python client, pairing, cleanup, and theme-sync installer honor
+`XDG_CONFIG_HOME` and `XDG_STATE_HOME`, falling back to `~/.config` and
+`~/.local/state` when unset or empty. Theme settings must be a JSON object with
+boolean room overrides; malformed settings are rejected instead of overwritten.
 
 ## Development checks
 

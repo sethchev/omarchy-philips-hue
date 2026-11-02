@@ -7,7 +7,9 @@ function apiCmd(args) {
 }
 
 function isValidIp(ip) {
-  return /^(\d{1,3}\.){3}\d{1,3}$/.test(ip)
+  return /^(\d{1,3}\.){3}\d{1,3}$/.test(ip) && ip.split(".").every(function(part) {
+    return Number(part) <= 255 && (part === "0" || part.charAt(0) !== "0")
+  })
 }
 
 function isValidId(id) {
@@ -25,7 +27,7 @@ function parseConfig(text) {
     var bridgeId = String(parsed.bridgeId || "").trim().toLowerCase()
     if (!bridgeIp || !isValidIp(bridgeIp)) return null
     if (!username || !isValidId(username)) return null
-    if (bridgeId && !isValidId(bridgeId)) bridgeId = ""
+    if (bridgeId && !/^[0-9a-f]{16}$/.test(bridgeId)) return null
     var apiVersion = String(parsed.apiVersion || "v1").toLowerCase()
     if (apiVersion !== "v1" && apiVersion !== "v2") apiVersion = "v1"
     return { bridgeIp: bridgeIp, username: username, bridgeId: bridgeId, apiVersion: apiVersion }

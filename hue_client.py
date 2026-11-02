@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import colorsys
 import json
+import ipaddress
 import os
 import re
 import socket
@@ -19,10 +20,12 @@ from hue_transport import no_redirect_opener
 
 PLUGIN_DIR = Path(__file__).resolve().parent
 CACERT = PLUGIN_DIR / "hue_bridge_cacert.pem"
-CREDS_FILE = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "omarchy/settings/hue.json"
-CONFIG_FILE = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "omarchy/settings/hue-theme.json"
-COLORS_FILE = Path.home() / ".local/state/omarchy/current/theme/colors.toml"
-LOG_FILE = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "omarchy/hue-theme-hook.log"
+STATE_HOME = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state")
+CONFIG_HOME = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+CREDS_FILE = STATE_HOME / "omarchy/settings/hue.json"
+CONFIG_FILE = CONFIG_HOME / "omarchy/settings/hue-theme.json"
+COLORS_FILE = STATE_HOME / "omarchy/current/theme/colors.toml"
+LOG_FILE = STATE_HOME / "omarchy/hue-theme-hook.log"
 
 _MAX_LOCAL_READ = 1_048_576  # 1 MiB
 _MAX_RESPONSE_BYTES = 16_777_216  # 16 MiB
@@ -218,6 +221,14 @@ class HueClient:
         self.bridge_ip = str(self.creds["bridgeIp"])
         self.bridge_id = str(self.creds.get("bridgeId") or "").strip().lower()
         self.username = str(self.creds["username"])
+        try:
+            ipaddress.IPv4Address(self.bridge_ip)
+        except ValueError as error:
+            raise HueError("Invalid bridge IPv4 address") from error
+        if not _SAFE_ID.fullmatch(self.username):
+            raise HueError("Invalid Hue application key")
+        if self.bridge_id and not re.fullmatch(r"[0-9a-f]{16}", self.bridge_id):
+            raise HueError("Invalid bridge ID")
         self._opener = None
 
     def _url(self, path: str) -> tuple[str, str | None]:
@@ -741,6 +752,39 @@ def secure_log(message: str):
             pass
 
 
+def read_theme_config() -> dict:
+    missing = object()
+    cfg = read_json(CONFIG_FILE, missing)
+    if cfg is missing:
+        if not CONFIG_FILE.exists() and not CONFIG_FILE.is_symlink():
+            return {}
+        raise HueError("Could not read theme settings")
+    if not isinstance(cfg, dict):
+        raise HueError("Theme settings must be an object")
+    for key in ("themeSync", "sceneRooms", "favoriteRooms"):
+        value = cfg.get(key, {})
+        if not isinstance(value, dict) or any(
+            not _SAFE_ID.fullmatch(str(item)) or not isinstance(enabled, bool)
+            for item, enabled in value.items()
+        ):
+            raise HueError("Invalid %s settings" % key)
+    for key in ("enabled", "scene", "turnOn"):
+        if key in cfg and not isinstance(cfg[key], bool):
+            raise HueError("Invalid %s setting" % key)
+    if "groups" in cfg and (not isinstance(cfg["groups"], list) or
+                            any(not isinstance(item, str) for item in cfg["groups"])):
+        raise HueError("Theme groups must be a list of names")
+    if not isinstance(cfg.get("themes", {}), dict):
+        raise HueError("Theme overrides must be an object")
+    for key, low, high in (("transition", 0, 65535), ("bri", 1, 254)):
+        value = cfg.get(key)
+        if value is not None and (isinstance(value, bool) or
+                                  not isinstance(value, (int, float)) or
+                                  not low <= value <= high):
+            raise HueError("Invalid %s setting" % key)
+    return cfg
+
+
 def _theme_targets(state: dict, cfg: dict, room_id: str | None = None) -> list[tuple[str, dict]]:
     groups = state["groups"]
     if room_id is not None:
@@ -757,7 +801,7 @@ def _theme_targets(state: dict, cfg: dict, room_id: str | None = None) -> list[t
 
 
 def theme_sync(theme_slug: str = "", room_id: str | None = None) -> tuple[int, int]:
-    cfg = read_json(CONFIG_FILE, {}) or {}
+    cfg = read_theme_config()
     if not cfg.get("enabled", True):
         return 0, 0
     anchor = accent_color()
@@ -770,7 +814,7 @@ def theme_sync(theme_slug: str = "", room_id: str | None = None) -> tuple[int, i
     state = client.get_state()
     targets = _theme_targets(state, cfg, room_id)
     hue, saturation = _hex_to_hs(color)
-    transition = int(cfg.get("transition", 20) or 20)
+    transition = int(cfg.get("transition") if cfg.get("transition") is not None else 20)
     base_body = {"hue": hue, "sat": saturation, "transitiontime": transition}
     if cfg.get("bri") is not None:
         base_body["bri"] = int(_clamp(float(cfg["bri"]), 1, 254))
@@ -779,21 +823,50 @@ def theme_sync(theme_slug: str = "", room_id: str | None = None) -> tuple[int, i
     scene_default = bool(cfg.get("scene", False))
     scene_rooms = cfg.get("sceneRooms") or {}
     palette = build_scene_palette(color)
-    sent = 0
+    # Rooms own their lights before zones; stable IDs break ties. This keeps
+    # palette assignment deterministic even when bridge response order changes.
+    targets.sort(key=lambda item: (item[1].get("type") != "Room", str(item[0])))
+    claimed = set()
+    if room_id is None:
+        for group_id, group in state["groups"].items():
+            if (cfg.get("themeSync") or {}).get(group_id) is False:
+                claimed.update(group.get("lights", []))
+    sent, total, failures = 0, 0, 0
     for group_id, group in targets:
-        light_resources = [state["lights"][light_id] for light_id in group.get("lights", []) if light_id in state["lights"] and state["lights"][light_id].get("has_color")]
+        member_ids = list(dict.fromkeys(group.get("lights", [])))
+        owned_ids = [light_id for light_id in member_ids if light_id not in claimed]
+        claimed.update(member_ids)
+        light_resources = [state["lights"][light_id] for light_id in owned_ids
+                           if light_id in state["lights"] and state["lights"][light_id].get("has_color")]
+        if not light_resources:
+            continue
+        total += 1
         use_scene = scene_rooms.get(group_id, scene_default) and len(light_resources) >= 2 and palette
-        if use_scene:
+        room_failed = False
+        # A grouped write would overwrite lights already owned by another room.
+        individual = use_scene or len(owned_ids) != len(member_ids) or not group.get("control_id")
+        if individual:
             for index, light in enumerate(light_resources):
-                light_hue, light_sat = _hex_to_hs(palette[index % len(palette)])
-                body = dict(base_body, hue=light_hue, sat=light_sat)
-                client.put_light(light["api_id"], body, light)
-            secure_log("theme scene: room %s -> %d light(s), palette #%s" % (group_id, len(light_resources), color))
+                body = dict(base_body)
+                if use_scene:
+                    light_hue, light_sat = _hex_to_hs(palette[index % len(palette)])
+                    body.update(hue=light_hue, sat=light_sat)
+                try:
+                    client.put_light(light["api_id"], body, light)
+                except HueError:
+                    room_failed = True
+                    secure_log("theme sync: light %s in group %s failed" % (light["api_id"], group_id))
         else:
-            control_id = group.get("control_id")
-            if not control_id:
-                continue
-            client.put_group(control_id, base_body)
-        sent += 1
-    secure_log("theme sync: %d/%d group(s) via %s -> #%s" % (sent, len(targets), client.api_version, color))
-    return sent, len(targets)
+            try:
+                client.put_group(group["control_id"], base_body)
+            except HueError:
+                room_failed = True
+                secure_log("theme sync: group %s failed" % group_id)
+        if room_failed:
+            failures += 1
+        else:
+            sent += 1
+    secure_log("theme sync: %d/%d group(s) via %s -> #%s" % (sent, total, client.api_version, color))
+    if failures:
+        raise HueError("Theme sync partially completed: %d/%d group(s) succeeded" % (sent, total))
+    return sent, total

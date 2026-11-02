@@ -16,7 +16,7 @@ from hue_client import (
     HueClient,
     HueError,
     migrate_api,
-    read_json,
+    read_theme_config,
     secure_log,
     theme_sync,
     write_json_secure,
@@ -30,7 +30,7 @@ def _config_map(key: str, raw: str):
     for resource_id, enabled in settings.items():
         if not re.fullmatch(r"[0-9A-Za-z_-]{1,64}", str(resource_id)) or not isinstance(enabled, bool):
             raise HueError("Invalid room setting")
-    config = read_json(CONFIG_FILE, {}) or {}
+    config = read_theme_config()
     config[key] = settings
     write_json_secure(CONFIG_FILE, config)
 

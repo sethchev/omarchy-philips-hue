@@ -14,6 +14,9 @@ Panel {
   property var hostWidget: null
   readonly property var barIdentity: hostWidget || root
 
+  readonly property string stateHome: Quickshell.env("XDG_STATE_HOME") || Quickshell.env("HOME") + "/.local/state"
+  readonly property string configHome: Quickshell.env("XDG_CONFIG_HOME") || Quickshell.env("HOME") + "/.config"
+
   property var config: null
   property string currentThemeName: ""
   property var lightsById: ({})
@@ -471,7 +474,7 @@ Panel {
   }
 
   property FileView configFile: FileView {
-    path: Quickshell.env("HOME") + "/.local/state/omarchy/settings/hue.json"
+    path: root.stateHome + "/omarchy/settings/hue.json"
     watchChanges: true
     printErrors: false
     onFileChanged: reload()
@@ -487,7 +490,7 @@ Panel {
   }
 
   property FileView themeNameFile: FileView {
-    path: Quickshell.env("HOME") + "/.local/state/omarchy/current/theme.name"
+    path: root.stateHome + "/omarchy/current/theme.name"
     watchChanges: true
     printErrors: false
     onFileChanged: reload()
@@ -498,7 +501,7 @@ Panel {
   property var sceneRooms: ({})
   property bool sceneDefault: false
   property FileView themeConfigFile: FileView {
-    path: Quickshell.env("HOME") + "/.config/omarchy/settings/hue-theme.json"
+    path: root.configHome + "/omarchy/settings/hue-theme.json"
     watchChanges: true
     printErrors: false
     onFileChanged: reload()
@@ -809,7 +812,7 @@ Panel {
           Text {
             visible: root.insecureMode
             width: parent.width
-            text: "TLS verification disabled. Re-run pair.sh to secure the connection."
+            text: "Bridge hostname verification unavailable. Re-run pair.sh to verify bridge identity."
             color: Color.urgent
             font.family: root.bar.fontFamily
             font.pixelSize: Style.font.caption
