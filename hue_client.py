@@ -843,28 +843,46 @@ def theme_sync(theme_slug: str = "", room_id: str | None = None) -> tuple[int, i
         owned_ids = [light_id for light_id in member_ids if light_id not in claimed]
         claimed.update(member_ids)
         light_resources = [state["lights"][light_id] for light_id in owned_ids
-                           if light_id in state["lights"] and state["lights"][light_id].get("has_color")]
-        if not light_resources:
+                           if light_id in state["lights"]]
+        color_count = sum(bool(light.get("has_color")) for light in light_resources)
+        use_scene = scene_rooms.get(group_id, scene_default) and color_count >= 2 and palette
+        updates = []
+        color_index = 0
+        for light in light_resources:
+            body = {"transitiontime": transition}
+            if light.get("has_color"):
+                light_hue, light_sat = (_hex_to_hs(palette[color_index % len(palette)])
+                                       if use_scene else (hue, saturation))
+                body.update(hue=light_hue, sat=light_sat)
+                color_index += 1
+            if "bri" in base_body and light.get("has_bri"):
+                body["bri"] = base_body["bri"]
+            if "on" in base_body:
+                body["on"] = base_body["on"]
+            # Transition alone does not change a light's state.
+            if len(body) > 1:
+                updates.append((light, body))
+        if not updates:
             continue
         total += 1
-        use_scene = scene_rooms.get(group_id, scene_default) and len(light_resources) >= 2 and palette
         room_failed = False
         # A grouped write would overwrite lights already owned by another room.
         individual = use_scene or len(owned_ids) != len(member_ids) or not group.get("control_id")
         if individual:
-            for index, light in enumerate(light_resources):
-                body = dict(base_body)
-                if use_scene:
-                    light_hue, light_sat = _hex_to_hs(palette[index % len(palette)])
-                    body.update(hue=light_hue, sat=light_sat)
+            for light, body in updates:
                 try:
                     client.put_light(light["api_id"], body, light)
                 except HueError:
                     room_failed = True
                     secure_log("theme sync: light %s in group %s failed" % (light["api_id"], group_id))
         else:
+            # Uniform values may share a grouped write. Include only fields
+            # supported by at least one member; white-only groups get no color.
+            group_body = {}
+            for _light, body in updates:
+                group_body.update(body)
             try:
-                client.put_group(group["control_id"], base_body)
+                client.put_group(group["control_id"], group_body)
             except HueError:
                 room_failed = True
                 secure_log("theme sync: group %s failed" % group_id)

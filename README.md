@@ -266,7 +266,9 @@ sync, a disabled group's bulbs are protected from writes through other zones.
 Explicit room previews remain scoped to that room. Individual bulb or group
 failures do not stop other targets; partial failures are logged and return an
 error after the remaining targets have been attempted. A transition of `0`
-applies immediately.
+applies immediately. Brightness and power settings also apply to white-only
+lights, including bulbs remaining in overlapping zones; color assignment is
+limited to color-capable bulbs. Brightness is sent only where dimming is supported.
 
 The panel, Python client, pairing, cleanup, and theme-sync installer honor
 `XDG_CONFIG_HOME` and `XDG_STATE_HOME`, falling back to `~/.config` and

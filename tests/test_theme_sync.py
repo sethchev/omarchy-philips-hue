@@ -17,7 +17,7 @@ import hue_client
 class ThemeSyncTests(unittest.TestCase):
     def setUp(self):
         self.state = {
-            'lights': {key: {'api_id': key, 'has_color': True} for key in ('1', '2', '3', '4')},
+            'lights': {key: {'api_id': key, 'has_color': True, 'has_bri': True} for key in ('1', '2', '3', '4')},
             'groups': {
                 'zone': {'type': 'Zone', 'lights': ['1', '2', '3'], 'control_id': 'zone'},
                 'room': {'type': 'Room', 'lights': ['1', '2'], 'control_id': 'room'},
@@ -65,6 +65,53 @@ class ThemeSyncTests(unittest.TestCase):
         self.assertEqual(hue_client.theme_sync(room_id='zone'), (1, 1))
         self.assertEqual(self.client.put_group.call_args.args[0], 'zone')
         self.assertEqual(self.client.put_group.call_args.args[1]['transitiontime'], 0)
+
+    def test_white_only_room_preserves_grouped_brightness_and_power_updates(self):
+        self.state['lights']['4']['has_color'] = False
+        for version in ('v1', 'v2'):
+            for settings, expected in (({'bri': 100}, {'bri': 100}),
+                                       ({'turnOn': True}, {'on': True}),
+                                       ({'bri': 100, 'turnOn': True}, {'bri': 100, 'on': True})):
+                with self.subTest(version=version, settings=settings):
+                    self.client.api_version = version
+                    self.client.reset_mock()
+                    self.read_theme_config.return_value = settings
+                    self.assertEqual(hue_client.theme_sync(room_id='other'), (1, 1))
+                    self.client.put_group.assert_called_once_with(
+                        'other', dict(expected, transitiontime=20))
+                    self.client.put_light.assert_not_called()
+
+    def test_overlapping_zone_preserves_individual_white_light_updates(self):
+        self.state['lights']['3']['has_color'] = False
+        self.read_theme_config.return_value = {'bri': 100, 'turnOn': True}
+        self.assertEqual(hue_client.theme_sync(), (3, 3))
+        self.client.put_light.assert_called_once_with(
+            '3', {'transitiontime': 20, 'bri': 100, 'on': True}, self.state['lights']['3'])
+        self.assertEqual([call.args[0] for call in self.client.put_group.call_args_list], ['other', 'room'])
+
+    def test_mixed_scene_updates_white_bulbs_without_consuming_palette_colors(self):
+        self.state['lights']['white'] = {'api_id': 'white', 'has_color': False, 'has_bri': True}
+        self.state['groups']['room']['lights'] = ['1', 'white', '2']
+        self.read_theme_config.return_value = {'scene': True, 'bri': 100, 'turnOn': True}
+        self.assertEqual(hue_client.theme_sync(room_id='room'), (1, 1))
+        calls = self.client.put_light.call_args_list
+        self.assertEqual([call.args[0] for call in calls], ['1', 'white', '2'])
+        self.assertEqual(calls[0].args[1], {'transitiontime': 20, 'bri': 100, 'on': True, 'hue': 0, 'sat': 254})
+        self.assertEqual(calls[1].args[1], {'transitiontime': 20, 'bri': 100, 'on': True})
+        self.assertEqual(calls[2].args[1]['hue'], hue_client._hex_to_hs('00ff00')[0])
+        self.client.put_group.assert_not_called()
+
+    def test_unsupported_white_light_updates_do_not_send_empty_or_color_only_writes(self):
+        self.state['lights']['4'].update(has_color=False, has_bri=False)
+        for settings in ({}, {'bri': 100}):
+            with self.subTest(settings=settings):
+                self.read_theme_config.return_value = settings
+                self.assertEqual(hue_client.theme_sync(room_id='other'), (0, 0))
+                self.client.put_group.assert_not_called()
+                self.client.put_light.assert_not_called()
+        self.read_theme_config.return_value = {'bri': 100, 'turnOn': True}
+        self.assertEqual(hue_client.theme_sync(room_id='other'), (1, 1))
+        self.client.put_group.assert_called_once_with('other', {'transitiontime': 20, 'on': True})
 
     def test_bridge_order_does_not_change_palette_assignment(self):
         self.read_theme_config.return_value = {'scene': True}
