@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "HueApi.js" as HueApi
 
@@ -20,7 +21,7 @@ Column {
     rowColor: HueApi.lightColor(root.light)
     checked: root.light.on
     foreground: Qt.darker(root.bar.foreground, 1.2)
-    accent: Color.accent
+    accent: Commons.Color.accent
     fontFamily: root.bar.fontFamily
     onClicked: root.controller.toggleLight(root.light.id, !root.light.on)
   }
@@ -65,7 +66,7 @@ Column {
         anchors.fill: parent
         radius: Style.space(11)
         border.width: root.pickerOpen || pickerButton.activeFocus ? 2 : 1
-        border.color: root.pickerOpen || pickerButton.activeFocus ? Color.accent : Qt.darker(root.bar.foreground, 1.6)
+        border.color: root.pickerOpen || pickerButton.activeFocus ? Commons.Color.accent : Qt.darker(root.bar.foreground, 1.6)
         color: "transparent"
       }
       MouseArea {

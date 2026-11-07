@@ -23,6 +23,11 @@ spec.loader.exec_module(cli)
 
 
 class DiagnosticTests(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch('hue_party.request', return_value={})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_transport_failures_have_stable_codes_and_no_raw_details(self):
         for error, expected in (
             (urllib.error.HTTPError('https://secret-key.invalid', 401, 'secret-key', {}, None), 'auth'),

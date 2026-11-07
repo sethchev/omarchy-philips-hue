@@ -84,6 +84,121 @@ Existing credential files without an `apiVersion` remain on v1 until this is
 run. To switch back, use the same command with `v1`. Re-pairing is only needed
 if the key was revoked or the bridge was reset or replaced.
 
+## Party Mode
+
+Expand a room and turn on **Party Mode** to animate the current theme palette.
+A single color-capable light advances through each color every 1.5 seconds.
+With multiple lights, colors move to the next bulb every 1.5 seconds with a
+half-second fade. All palette colors take part, even when there are more
+colors than bulbs. Brightness stays unchanged; off, unreachable, and white-only
+lights are skipped without shifting the other bulbs' positions.
+
+Use **Arrange party light order** to put the lights in their physical order
+around the room. The up/down buttons save the order under `partyOrder` in
+`hue-theme.json`; newly discovered lights follow the saved ones.
+
+Party Mode works with Theme Sync on or off and does not require thpm. While it
+runs, theme sync leaves those bulbs alone and manual color controls are hidden.
+Changing themes updates the moving palette. Choosing a saved scene or built-in
+preset stops Party Mode in overlapping rooms before applying the scene.
+Overlapping rooms/zones cannot start competing parties.
+
+Turning Party Mode off restores the normal theme for synced rooms, or the
+previous bulb colors for rooms with sync off. Closing the panel keeps the
+party running. Shell/plugin reloads stop the worker and leave its last colors
+in place; Party Mode always starts off after a restart. Light order is retained.
+
+One local Python worker runs with the plugin. While Party Mode is active it
+reads bridge state once per frame and sends color writes individually, using
+the shared v1/v2 HTTPS client. Writes are serialized; missed frames are dropped,
+and bridge errors pause animation with bounded retries and a panel message.
+An idle worker sends no bridge requests. No Hue scenes are created for animation.
+
+### Music Sync
+
+**Music Sync** uses the system **aubio** real-time tempo tracker to hold a
+rhythmic beat clock, rather than reacting to every bass-volume spike. Fixed
+theme colors sit at **10% between beats** and smoothly rise to **75% on the
+predicted beat**, then fade down. These are absolute brightness targets,
+independent of the bulbs' brightness when Music Sync starts. Switched-off bulbs
+stay off. Original brightness is saved and restored when leaving Music Sync.
+
+The panel shows **Rhythm locked**, estimated BPM, confidence, and tracked beat
+count. Acquisition takes several seconds. If confidence, rhythmic evidence, or
+audio continuity is lost, the lights settle to the between-beat level.
+
+**Between beats** and **On beat** adjust the low and high brightness targets.
+**Pulse pace** adjusts the width of the rise/fall within each beat period. The
+beat clock begins the rise ahead of the beat; a short rounded peak keeps the
+75% target reachable at the 25 Hz streaming cadence. Color smoothing is applied
+separately, so it cannot flatten or delay the brightness envelope. Entry into
+the mode fades from the previous lighting over 400 ms.
+
+**Sensitivity** fine-tunes aubio's onset threshold without bypassing rhythm
+lock. **Timing offset** (−300 to +300 ms) calibrates physical playback/network/
+bulb latency: negative values move the peak earlier and positive values later.
+Software peak scheduling is tested against known clicks; physical bulb latency
+is not measured automatically. The old relative pulse-depth setting is retained
+in existing settings files for compatibility but is no longer used.
+
+All samples are processed in sequence. A large capture backlog or a default
+output change explicitly resets the tracker instead of feeding it silently
+truncated audio. Theme changes and slider adjustments remain smoothed. Sliders
+apply while dragging, with writes batched every 150 ms. Saved light order
+determines the fixed palette assignment.
+
+Install the tracker dependency with `omarchy pkg add aubio`. The shared system
+library is used directly; Python aubio bindings are not required. To diagnose
+tracking without connecting to the lights or saving audio:
+
+```sh
+python3 -B hue-beat-check.py metronome --bpm 120 --seconds 30
+python3 -B hue-beat-check.py playback --seconds 30
+```
+
+The metronome is synthesized in memory, never played through the speakers.
+The tests check reference-click timing at 90/120/150 BPM, guitar interference,
+rejection of stationary noise and tones, confidence loss, capture continuity,
+and alignment through the actual pulse-rendering pipeline. Those software
+measurements are not measurements of physical bulb timing.
+
+Enable Music Sync from an expanded room after Entertainment pairing. Music Sync
+and Party Mode are mutually exclusive: selecting one stops the other. Music
+Sync does not run the timed party cycle or leave its toggle switched on.
+Turning either mode off restores the room's normal theme or saved colors.
+Scenes and manual light/room power or brightness changes stop music streaming
+before applying the requested control. Shell/plugin shutdown releases both the
+audio capture and Entertainment Area. Music Sync starts off after a restart.
+
+Playback is captured from the default PipeWire output monitor, including all
+sound on that output. The microphone is never selected. Samples stay in memory
+and are never recorded to files or uploaded. Capture follows default-output
+changes and exists only while Music Sync is on. Requires `pw-cat`, `pactl`, and
+system OpenSSL with DTLS 1.2 PSK support, and `aubio`; no Python audio or crypto packages are
+needed. Frames stream locally at up to 25 Hz, without per-frame REST writes.
+
+A room needs an existing Hue Entertainment Area containing exactly that room's
+color lights. The plugin uses existing areas and leaves their configuration
+unchanged. Only one music stream can run on the bridge, and an area already in
+use by another app is left alone. Playback errors stop Music Sync, release its
+resources, and appear in the room's status message.
+
+### Preparing Hue Entertainment
+
+Music synchronization needs a separate Entertainment application key and DTLS
+streaming client key. Existing regular-control pairings can add them with:
+
+```sh
+python3 -B ~/.config/omarchy/plugins/omarchy-philips-hue/hue_entertainment.py pair
+```
+
+Press the physical bridge link button when prompted. The helper first checks
+Entertainment API support, requests both keys, verifies the new application
+key, and saves them under `entertainment` in the existing private `hue.json`.
+The regular control key is preserved. Keys are never printed or logged. A
+failed or expired pairing leaves existing credentials unchanged. This pairing
+step does not start a stream or change the Entertainment Area configuration.
+
 ## Scenes
 
 Open a room in the panel and expand **Scenes** to browse its saved bridge scenes
@@ -301,7 +416,7 @@ The panel, Python client, pairing, cleanup, and theme-sync installer honor
 `~/.local/state` when unset or empty. Theme settings must be a JSON object with
 boolean room overrides; malformed settings are rejected instead of overwritten.
 
-Pending brightness, temperature, and color updates replace only an adjacent
+Pending brightness, temperature, color, and music-option updates replace only an adjacent
 pending update to the same target and property. In-flight writes, toggles,
 scenes, and settings retain their order. Scene application reuses one snapshot,
 and v2 color writes reuse the snapshot's gamut when available.

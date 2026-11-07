@@ -31,7 +31,7 @@ function parseConfig(text) {
     if (bridgeId && !/^[0-9a-f]{16}$/.test(bridgeId)) return null
     var apiVersion = String(parsed.apiVersion || "v1").toLowerCase()
     if (apiVersion !== "v1" && apiVersion !== "v2") apiVersion = "v1"
-    return { bridgeIp: bridgeIp, username: username, bridgeId: bridgeId, apiVersion: apiVersion }
+    return { bridgeIp: bridgeIp, username: username, bridgeId: bridgeId, apiVersion: apiVersion, entertainmentPaired: !!(parsed.entertainment && parsed.entertainment.username && parsed.entertainment.clientKey) }
   } catch (e) {
     return null
   }
@@ -283,8 +283,9 @@ function roomColorLightCount(room) {
 
 
 // Only adjacent pending scalar updates may replace each other. Toggles,
-// scenes, config writes, and updates to other properties act as barriers.
+// scenes, unrelated config writes, and other properties act as barriers.
 function actionReplaceKey(command) {
+  if (command[2] === "write-music-options") return "music-options:" + command[3]
   if (command[2] !== "put-light" && command[2] !== "put-group") return ""
   var body = parseJsonObject(command[4])
   if (!isObject(body)) return ""
