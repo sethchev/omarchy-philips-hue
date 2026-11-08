@@ -19,30 +19,35 @@ Column {
     height: Style.space(34)
     radius: Style.cornerRadius
     color: "transparent"
-    borderSpec: Border.controlSpec(search.activeFocus ? "focus" : "normal", root.bar.foreground, Commons.Color.accent)
+    borderSpec: Border.controlSpec(searchLoader.item && searchLoader.item.activeFocus ? "focus" : "normal", root.bar.foreground, Commons.Color.accent)
 
-    TextInput {
-      id: search
-      objectName: "sceneSearch"
+    Loader {
+      id: searchLoader
       anchors.fill: parent
       anchors.margins: Style.space(8)
-      text: root.controller.sceneQueries[root.room.id] || ""
-      color: root.bar.foreground
-      font.family: root.bar.fontFamily
-      font.pixelSize: Style.font.body
-      verticalAlignment: TextInput.AlignVCenter
-      clip: true
-      selectByMouse: true
-      activeFocusOnTab: true
-      Accessible.name: "Search scenes for " + root.room.name
-      onTextEdited: root.controller.setSceneQuery(root.room.id, text)
+      // Hidden writable TextInputs can still inspect Wayland clipboard offers.
+      active: visible
+      sourceComponent: TextInput {
+        id: search
+        objectName: "sceneSearch"
+        text: root.controller.sceneQueries[root.room.id] || ""
+        color: root.bar.foreground
+        font.family: root.bar.fontFamily
+        font.pixelSize: Style.font.body
+        verticalAlignment: TextInput.AlignVCenter
+        clip: true
+        selectByMouse: true
+        activeFocusOnTab: true
+        Accessible.name: "Search scenes for " + root.room.name
+        onTextEdited: root.controller.setSceneQuery(root.room.id, text)
 
-      Text {
-        visible: search.text === ""
-        anchors.verticalCenter: parent.verticalCenter
-        text: "Search scenes…"
-        color: Qt.darker(root.bar.foreground, 1.4)
-        font: search.font
+        Text {
+          visible: search.text === ""
+          anchors.verticalCenter: parent.verticalCenter
+          text: "Search scenes…"
+          color: Qt.darker(root.bar.foreground, 1.4)
+          font: search.font
+        }
       }
     }
   }
