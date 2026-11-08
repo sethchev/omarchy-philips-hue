@@ -11,7 +11,7 @@ Omarchy / Quickshell bar widget for controlling Philips Hue lights over the brid
 - Bar icon (lightbulb) that opens a control panel
 - Toggle all rooms, individual rooms, or single lights
 - Party Mode: theme colors flow between a room's bulbs every 1.5 seconds
-- Music Sync: bulbs pulse on the detected beat of whatever is playing, streamed
+- Music Sync (BETA, in testing): bulbs pulse on the detected beat of whatever is playing, streamed
   over the Hue Entertainment API (requires a bridge that supports it — see below)
 - Compact per-room scene browser for saved bridge scenes and four built-in presets; six tiles per page, with search for longer lists
 - Every room and light row is tinted with the bulb's current color
@@ -131,7 +131,12 @@ the shared v1/v2 HTTPS client. Writes are serialized; missed frames are dropped,
 and bridge errors pause animation with bounded retries and a panel message.
 An idle worker sends no bridge requests. No Hue scenes are created for animation.
 
-## Music Sync
+## Music Sync (BETA)
+
+> **Music Sync is in beta.** The feature is still in testing: beat tracking,
+> streaming, and the controls may change, and behavior may be adjusted in
+> plugin updates. Report anything that looks wrong rather than relying on it
+> for anything important. Party Mode is stable and unaffected.
 
 **Music Sync** makes the room's bulbs pulse on the detected beat of whatever is
 playing, streaming colors and brightness directly to the bridge over the

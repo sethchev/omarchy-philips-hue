@@ -1258,8 +1258,8 @@ Panel {
                 InlineToggle {
                   visible: roomColumn.lightsOpen && HueApi.roomColorLightCount(roomColumn.modelData) > 0 && root.config !== null && root.config.entertainmentPaired === true
                   width: parent.width
-                  label: "Music Sync"
-                  description: "Low between beats; rising to the peak on each tracked beat"
+                  label: "Music Sync (BETA)"
+                  description: "Testing: low between beats; rising to the peak on each tracked beat"
                   checked: root.musicOn(roomColumn.modelData.id)
                   foreground: root.bar.foreground
                   accent: Commons.Color.accent
