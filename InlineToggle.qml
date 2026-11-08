@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 // Labeled toggle row: title + optional description on the left, an interactive
@@ -35,8 +36,8 @@ BorderSurface {
   // Override per-instance if a caller wants the opposite.
   property bool rounded: Style.cornerRadius > 0
 
-  property color foreground: Color.foreground
-  property color accent: Color.accent
+  property color foreground: Commons.Color.foreground
+  property color accent: Commons.Color.accent
   property string fontFamily: Style.font.family
   property real titleSize: Style.font.subtitle
   property real descriptionSize: Style.font.caption

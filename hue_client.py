@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import colorsys
+import contextlib
+import fcntl
 import functools
 import http.client
 import json
@@ -26,6 +28,7 @@ CACERT = PLUGIN_DIR / "hue_bridge_cacert.pem"
 STATE_HOME = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state")
 CONFIG_HOME = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
 CREDS_FILE = STATE_HOME / "omarchy/settings/hue.json"
+CREDENTIALS_LOCK = CREDS_FILE.parent / ".hue-credentials.lock"
 CONFIG_FILE = CONFIG_HOME / "omarchy/settings/hue-theme.json"
 COLORS_FILE = STATE_HOME / "omarchy/current/theme/colors.toml"
 LOG_FILE = STATE_HOME / "omarchy/hue-theme-hook.log"
@@ -96,6 +99,31 @@ def _read_text_limited(path: Path, limit: int = _MAX_LOCAL_READ) -> str:
             os.close(fd)
     except OSError:
         return ""
+
+
+@contextlib.contextmanager
+def credentials_guard():
+    """Serialize credential read-modify-write cycles between helper processes.
+
+    Every writer of the credential file holds this lock across its final
+    read-compare-write so a concurrent pairing or migration cannot be
+    overwritten by a stale snapshot. If the lock file itself is unusable the
+    caller proceeds without it rather than breaking credential management.
+    """
+    handle = None
+    try:
+        CREDENTIALS_LOCK.parent.mkdir(parents=True, exist_ok=True)
+        handle = os.fdopen(os.open(CREDENTIALS_LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600), "r+")
+        fcntl.flock(handle, fcntl.LOCK_EX)
+    except OSError:
+        if handle:
+            handle.close()
+            handle = None
+    try:
+        yield
+    finally:
+        if handle:
+            handle.close()
 
 
 def read_json(path: Path, default=None):
@@ -459,7 +487,7 @@ class HueClient:
                     "reachable": connectivity.get(device_id) not in ("disconnected", "connectivity_issue"),
                     "bri": max(1, bri) if has_bri else 0,
                     "ct": ct, "hue": hue, "sat": sat,
-                    "xy": xy, "colormode": "xy" if has_color else ("ct" if has_ct else "")
+                    "xy": xy, "colormode": "ct" if has_ct and temperature.get("mirek_valid") else ("xy" if has_color else ("ct" if has_ct else ""))
                 },
                 "has_bri": has_bri,
                 "has_ct": has_ct,
@@ -521,6 +549,14 @@ class HueClient:
         if "hue" in body or "sat" in body:
             x, y = _hsv_to_xy(float(body.get("hue", 0)), float(body.get("sat", 0)), gamut)
             payload["color"] = {"xy": {"x": round(x, 5), "y": round(y, 5)}}
+        if "xy" in body:
+            xy = body["xy"]
+            if not isinstance(xy, (list, tuple)) or len(xy) != 2 or any(
+                isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or not 0 <= value <= 1 for value in xy
+            ):
+                raise HueError("Invalid light XY color")
+            payload["color"] = {"xy": {"x": float(xy[0]), "y": float(xy[1])}}
         if "transitiontime" in body:
             payload["dynamics"] = {"duration": max(0, int(body["transitiontime"])) * 100}
         if not payload:
@@ -746,14 +782,15 @@ def migrate_api(version: str) -> str:
     version = str(version).lower()
     if version not in ("v1", "v2"):
         raise HueError("API version must be v1 or v2")
-    creds = read_json(CREDS_FILE)
-    if not isinstance(creds, dict):
-        raise HueError("Hue bridge is not paired")
-    if not creds.get("bridgeId"):
-        creds["bridgeId"] = fetch_bridge_id(str(creds.get("bridgeIp") or ""))
-    HueClient(creds, version).verify()
-    creds["apiVersion"] = version
-    write_json_secure(CREDS_FILE, creds)
+    with credentials_guard():
+        creds = read_json(CREDS_FILE)
+        if not isinstance(creds, dict):
+            raise HueError("Hue bridge is not paired")
+        if not creds.get("bridgeId"):
+            creds["bridgeId"] = fetch_bridge_id(str(creds.get("bridgeIp") or ""))
+        HueClient(creds, version).verify()
+        creds["apiVersion"] = version
+        write_json_secure(CREDS_FILE, creds)
     return version
 
 
@@ -846,6 +883,25 @@ def read_theme_config() -> dict:
                                   not isinstance(value, (int, float)) or
                                   not low <= value <= high):
             raise HueError("Invalid %s setting" % key)
+    music_options = cfg.get("musicOptions", {})
+    if not isinstance(music_options, dict):
+        raise HueError("Invalid musicOptions settings")
+    for room, options in music_options.items():
+        if not _SAFE_ID.fullmatch(str(room)) or not isinstance(options, dict):
+            raise HueError("Invalid musicOptions settings")
+        for key, value in options.items():
+            low, high = ((-0.3, 0.3) if key == "timing" else ((0.0, 1.0) if key in ("intensity", "idle", "peak") else (0.25, 2.0)))
+            if key not in ("intensity", "sensitivity", "pace", "timing", "idle", "peak") or isinstance(value, bool) or not isinstance(value, (int, float)) or not low <= value <= high:
+                raise HueError("Invalid Music Sync option")
+        if options.get("idle", 0.10) > options.get("peak", 0.75):
+            raise HueError("Between-beat brightness must not exceed on-beat brightness")
+    order = cfg.get("partyOrder", {})
+    if not isinstance(order, dict) or any(
+        not _SAFE_ID.fullmatch(str(room)) or not isinstance(ids, list) or len(ids) > 256
+        or any(not isinstance(item, str) or not _SAFE_ID.fullmatch(item) for item in ids)
+        or len(set(ids)) != len(ids) for room, ids in order.items()
+    ):
+        raise HueError("Invalid partyOrder settings")
     return cfg
 
 
@@ -865,6 +921,12 @@ def _theme_targets(state: dict, cfg: dict, room_id: str | None = None) -> list[t
 
 
 def theme_sync(theme_slug: str = "", room_id: str | None = None) -> tuple[int, int]:
+    from hue_party import write_guard
+    with write_guard():
+        return _theme_sync(theme_slug, room_id)
+
+
+def _theme_sync(theme_slug: str = "", room_id: str | None = None) -> tuple[int, int]:
     cfg = read_theme_config()
     if not cfg.get("enabled", True):
         return 0, 0
@@ -890,7 +952,8 @@ def theme_sync(theme_slug: str = "", room_id: str | None = None) -> tuple[int, i
     # Rooms own their lights before zones; stable IDs break ties. This keeps
     # palette assignment deterministic even when bridge response order changes.
     targets.sort(key=lambda item: (item[1].get("type") != "Room", str(item[0])))
-    claimed = set()
+    from hue_party import active_light_ids
+    claimed = active_light_ids()
     if room_id is None:
         for group_id, group in state["groups"].items():
             if (cfg.get("themeSync") or {}).get(group_id) is False:

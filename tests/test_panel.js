@@ -10,11 +10,14 @@ const source = fs.readFileSync(path.join(dir, 'Panel.qml'), 'utf8');
 
 function harness() {
   const later = [];
-  const timers = () => ({ count: 0, restart() { this.count++; }, stop() {} });
+  const timers = () => ({ count: 0, running: false,
+    start() { this.count++; this.running = true; },
+    restart() { this.count++; this.running = true; }, stop() { this.running = false; } });
   const ctx = {
     Qt: { resolvedUrl: p => ({toString: () => 'file://' + p}), callLater: fn => later.push(fn) },
     stateProc: { running: false }, actionProc: { running: false },
     pollTimer: timers(), resyncTimer: timers(), sceneStatusTimer: timers(),
+    musicOptionsTimer: timers(),
     configFile: { reload() {} }, themeConfigFile: { count: 0, reload() { this.count++; } },
     root: {
       config: {apiVersion: 'v2'}, lightsById: {}, allControlId: '', rooms: [], scenes: [],
@@ -353,4 +356,127 @@ test('watchdog and malformed successful output produce distinct diagnostics', ()
   h.root.applyScene('4', 'Relax');
   completeAction(h, 1, JSON.stringify({error: {code: 'tls'}}));
   assert.match(h.root.actionError, /TLS connection failed/);
+});
+
+test('party commands are serialized and light order persists through the settings queue', () => {
+  const h = harness();
+  h.root.partyRooms = {};
+  h.root.partyOrder = {};
+  const room = {id: 'room', lights: [
+    {id: '1', name: 'Desk', hasColor: true},
+    {id: 'white', name: 'White', hasColor: false},
+    {id: '2', name: 'Shelf', hasColor: true},
+    {id: '3', name: 'Door', hasColor: true}
+  ]};
+  h.root.toggleParty('room');
+  assert.equal(h.actionProc.command[5], 'party');
+  assert.deepEqual(Array.from(h.actionProc.command.slice(6, 8)), ['start', 'room']);
+  h.root.movePartyLight(room, 2, -1);
+  assert.deepEqual(Array.from(h.root.partyOrder.room), ['1', '3', '2']);
+  assert.equal(h.root.actionQueue[0].command[2], 'write-party-order');
+  completeAction(h);
+  assert.equal(h.actionProc.command[5], 'write-party-order');
+  assert.equal(h.actionProc.command[7], '["1","3","2"]');
+  h.root.partyRooms = {room: true};
+  h.root.toggleParty('room');
+  completeAction(h);
+  assert.equal(h.actionProc.command[6], 'stop');
+});
+
+test('party ordering skips removed bulbs and preserves positions for off bulbs', () => {
+  const h = harness();
+  h.root.partyOrder = {room: ['gone', '2']};
+  const room = {id: 'room', lights: [
+    {id: '1', hasColor: true, on: true}, {id: '2', hasColor: true, on: false},
+    {id: 'white', hasColor: false}, {id: '3', hasColor: true, on: true}
+  ]};
+  assert.deepEqual(Array.from(h.root.partyLights(room), l => l.id), ['2', '1', '3']);
+  h.root.movePartyLight(room, 0, -1);
+  assert.equal(h.root.currentAction, null);
+});
+
+
+test('music sync uses the shared queue and preserves both room options', () => {
+  const h = harness();
+  h.root.musicRooms = {};
+  h.root.musicOptions = {};
+  h.root.toggleMusic('room');
+  assert.equal(h.actionProc.command[6], 'music-start');
+  h.root.setMusicOption('room', 'intensity', 0.8);
+  h.root.setMusicOption('room', 'sensitivity', 1.5);
+  h.root.setMusicOption('room', 'pace', 1.25);
+  assert.equal(h.root.musicOption('room', 'intensity'), 0.8);
+  assert.equal(h.root.musicOption('room', 'sensitivity'), 1.5);
+  assert.equal(h.root.musicOption('other', 'intensity'), 0.5);
+  assert.equal(h.root.musicOption('other', 'sensitivity'), 1.0);
+  assert.equal(h.root.musicOption('other', 'pace'), 1.0);
+  assert.equal(h.root.musicOption('other', 'timing'), 0);
+  h.root.flushMusicOptions();
+  completeAction(h);
+  assert.equal(h.actionProc.command[5], 'write-music-options');
+  assert.equal(h.actionProc.command[7], '{"intensity":0.8,"sensitivity":1.5,"pace":1.25}');
+  h.root.musicRooms = {room: true};
+  h.root.toggleMusic('room');
+  completeAction(h);
+  assert.equal(h.actionProc.command[6], 'music-stop');
+});
+
+test('config reloads retain queued music and party order edits until their writes complete', () => {
+  const h = harness();
+  h.root.musicOptions = {};
+  h.root.pendingMusicOptions = {};
+  h.root.flushedMusicOptions = {};
+  h.root.partyOrder = {};
+  h.root.pendingPartyOrder = {};
+  h.root.setMusicOption('room', 'sensitivity', 1.5);
+  h.root.flushMusicOptions();                            // write A queued/in flight
+  h.root.setMusicOption('room', 'sensitivity', 1.75);    // newer edit still pending
+  const room = {id: 'room', lights: [{id: '2', hasColor: true}, {id: '1', hasColor: true}]};
+  h.root.movePartyLight(room, 1, -1);                    // order write queued
+  assert.deepEqual(Array.from(h.root.partyOrder.room), ['1', '2']);
+  // A reload triggered by another settings write must not drop queued edits.
+  h.root.applyThemeSettings({musicOptions: {}, partyOrder: {}});
+  assert.equal(h.root.musicOption('room', 'sensitivity'), 1.75);
+  assert.deepEqual(Array.from(h.root.partyOrder.room), ['1', '2']);
+  completeAction(h);                                     // music write A finishes
+  h.root.applyThemeSettings({musicOptions: {room: {sensitivity: 9}}, partyOrder: {}});
+  assert.equal(h.root.musicOption('room', 'sensitivity'), 1.75); // pending still wins
+  assert.equal(h.root.flushedMusicOptions.room, undefined);      // flushed override released
+  completeAction(h);                                     // order write B finishes
+  assert.equal(h.root.pendingPartyOrder.room, undefined);
+  h.root.applyThemeSettings({musicOptions: {}, partyOrder: {}});
+  assert.deepEqual(h.root.partyOrder.room, undefined);   // nothing optimistic remains
+});
+
+test('dragging music sliders batches the latest values and bounds pending writes', () => {
+  const h = harness();
+  h.root.musicOptions = {};
+  for (let i = 0; i <= 100; i++) h.root.setMusicOption('room', 'intensity', i / 100);
+  assert.equal(h.musicOptionsTimer.count, 1);
+  assert.equal(h.root.currentAction, null);
+  h.root.flushMusicOptions();
+  assert.equal(h.actionProc.command[7], '{"intensity":1}');
+  for (let i = 0; i < 100; i++) {
+    h.root.setMusicOption('room', 'sensitivity', 0.25 + i / 100);
+    h.root.flushMusicOptions();
+  }
+  assert.equal(h.root.actionQueue.length, 1);
+  assert.equal(h.root.musicOption('room', 'sensitivity'), 1.24);
+  completeAction(h);
+  assert.equal(h.actionProc.command[7], '{"intensity":1,"sensitivity":1.24}');
+});
+
+test('concert brightness controls default to 10/75 and cannot cross each other', () => {
+  const h = harness();
+  h.root.musicOptions = {};
+  assert.equal(h.root.musicOption('room', 'idle'), 0.1);
+  assert.equal(h.root.musicOption('room', 'peak'), 0.75);
+  h.root.setMusicOption('room', 'idle', 0.9);
+  assert.equal(h.root.musicOption('room', 'idle'), 0.75);
+  h.root.setMusicOption('room', 'peak', 0.5);
+  assert.equal(h.root.musicOption('room', 'peak'), 0.75);
+  h.root.setMusicOption('room', 'idle', 0.1);
+  h.root.setMusicOption('room', 'peak', 0.8);
+  h.root.flushMusicOptions();
+  assert.equal(h.actionProc.command[7], '{"idle":0.1,"peak":0.8}');
 });

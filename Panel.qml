@@ -2,6 +2,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "HueApi.js" as HueApi
 
@@ -313,6 +314,110 @@ Panel {
     return null
   }
 
+  function partyOn(roomId) {
+    return !!root.partyRooms && root.partyRooms[roomId] === true
+  }
+
+  function musicOn(roomId) {
+    return !!root.musicRooms && root.musicRooms[roomId] === true
+  }
+
+  function toggleMusic(roomId) {
+    root.runAction(HueApi.apiCmd(["party", root.musicOn(roomId) ? "music-stop" : "music-start", roomId]))
+  }
+
+  function musicOption(roomId, key) {
+    var options = (root.musicOptions || {})[roomId] || {}
+    var defaults = { idle: 0.10, peak: 0.75, intensity: 0.5, timing: 0, pace: 1, sensitivity: 1 }
+    return options[key] === undefined ? defaults[key] : options[key]
+  }
+
+  function setMusicOption(roomId, key, value) {
+    var options = JSON.parse(JSON.stringify(root.musicOptions || {}))
+    if (!options[roomId]) options[roomId] = {}
+    var minimum = key === "timing" ? -0.3 : ((key === "idle" || key === "peak") ? 0 : 0.25)
+    var maximum = key === "timing" ? 0.3 : ((key === "idle" || key === "peak") ? 1 : 2)
+    options[roomId][key] = Math.round(Math.max(minimum, Math.min(maximum, value)) * 100) / 100
+    if (key === "idle") options[roomId].idle = Math.min(options[roomId].idle, root.musicOption(roomId, "peak"))
+    if (key === "peak") options[roomId].peak = Math.max(options[roomId].peak, root.musicOption(roomId, "idle"))
+    root.musicOptions = options
+    var pending = root.lightClone(root.pendingMusicOptions || {}, {})
+    pending[roomId] = options[roomId]
+    root.pendingMusicOptions = pending
+    if (!musicOptionsTimer.running) musicOptionsTimer.start()
+  }
+
+  function flushMusicOptions() {
+    var pending = root.pendingMusicOptions || {}
+    if (Object.keys(pending).length === 0) return
+    root.pendingMusicOptions = {}
+    // Keep flushed values until their write completes: a config reload while
+    // the write is in flight must not revert the visible option.
+    var flushed = root.lightClone(root.flushedMusicOptions || {}, {})
+    for (var roomId in pending) {
+      flushed[roomId] = pending[roomId]
+      root.runAction(HueApi.apiCmd(["write-music-options", roomId, JSON.stringify(pending[roomId])]),
+        { musicRooms: [roomId] })
+    }
+    root.flushedMusicOptions = flushed
+  }
+
+  function toggleParty(roomId) {
+    root.runAction(HueApi.apiCmd(["party", root.partyOn(roomId) ? "stop" : "start", roomId]))
+  }
+
+  function partyLights(room) {
+    var saved = (root.partyOrder || {})[room.id] || []
+    var lights = room.lights.filter(function(light) { return light.hasColor })
+    lights.sort(function(a, b) {
+      var ai = saved.indexOf(a.id), bi = saved.indexOf(b.id)
+      return (ai < 0 ? saved.length + room.lights.indexOf(a) : ai)
+        - (bi < 0 ? saved.length + room.lights.indexOf(b) : bi)
+    })
+    return lights
+  }
+
+  function movePartyLight(room, index, direction) {
+    var ids = root.partyLights(room).map(function(light) { return light.id })
+    var next = index + direction
+    if (next < 0 || next >= ids.length) return
+    var item = ids[index]
+    ids[index] = ids[next]
+    ids[next] = item
+    var order = JSON.parse(JSON.stringify(root.partyOrder || {}))
+    order[room.id] = ids
+    root.partyOrder = order
+    // Retained across reloads until the queued write completes.
+    var pending = root.lightClone(root.pendingPartyOrder || {}, {})
+    pending[room.id] = ids
+    root.pendingPartyOrder = pending
+    root.runAction(HueApi.apiCmd(["write-party-order", room.id, JSON.stringify(ids)]),
+      { partyOrderRoom: room.id })
+  }
+
+  function applyThemeSettings(parsed) {
+    root.themeSync = parsed.themeSync || {}
+    root.favoriteRooms = parsed.favoriteRooms || {}
+    root.partyOrder = root.lightClone(parsed.partyOrder || {}, root.pendingPartyOrder || {})
+    root.musicOptions = root.lightClone(root.lightClone(parsed.musicOptions || {},
+      root.flushedMusicOptions || {}), root.pendingMusicOptions || {})
+    root.sceneRooms = parsed.sceneRooms || {}
+    root.sceneDefault = parsed.scene === true
+  }
+
+  function clearOptimistic(musicRooms, partyOrderRoom) {
+    if (musicRooms.length > 0) {
+      var flushed = root.lightClone(root.flushedMusicOptions || {}, {})
+      for (var i = 0; i < musicRooms.length; i++) delete flushed[musicRooms[i]]
+      root.flushedMusicOptions = flushed
+    }
+    if (partyOrderRoom) {
+      var pending = root.lightClone(root.pendingPartyOrder || {}, {})
+      delete pending[partyOrderRoom]
+      root.pendingPartyOrder = pending
+    }
+  }
+
   function roomSyncOn(roomId) {
     return root.themeSync[roomId] !== false
   }
@@ -497,6 +602,9 @@ Panel {
   function tryCompleteAction() {
     if (!root.currentAction || !actionProc.actionExited || !actionProc.actionOutputFinished) return
     var context = root.currentAction.context
+    if (context.musicRooms || context.partyOrderRoom) {
+      root.clearOptimistic(context.musicRooms || [], context.partyOrderRoom)
+    }
     var failed = actionProc.actionExitCode !== 0
     if (failed) {
       var diagnostic = HueApi.connectionDiagnostic(actionProc.errorOutput, actionProc.actionExitCode, false)
@@ -540,6 +648,17 @@ Panel {
   }
 
   property var themeSync: ({})
+  property var partyRooms: ({})
+  property var musicRooms: ({})
+  property var musicBeats: ({})
+  property var musicTracking: ({})
+  property var musicOptions: ({})
+  property var pendingMusicOptions: ({})
+  property var flushedMusicOptions: ({})
+  property var partyLightIds: []
+  property var partyOrder: ({})
+  property var pendingPartyOrder: ({})
+  property string partyError: ""
   property var sceneRooms: ({})
   property bool sceneDefault: false
   property FileView themeConfigFile: FileView {
@@ -549,24 +668,63 @@ Panel {
     onFileChanged: reload()
     onLoaded: {
       try {
-        var parsed = JSON.parse(text())
-        root.themeSync = parsed.themeSync || {}
-        root.favoriteRooms = parsed.favoriteRooms || {}
-        root.sceneRooms = parsed.sceneRooms || {}
-        root.sceneDefault = parsed.scene === true
+        root.applyThemeSettings(JSON.parse(text()))
       } catch (e) {
-        root.themeSync = {}
-        root.favoriteRooms = {}
-        root.sceneRooms = {}
-        root.sceneDefault = false
+        root.applyThemeSettings({})
       }
     }
-    onLoadFailed: {
-      root.themeSync = {}
-      root.favoriteRooms = {}
-      root.sceneRooms = {}
-      root.sceneDefault = false
+    onLoadFailed: root.applyThemeSettings({})
+  }
+
+  Timer {
+    id: musicOptionsTimer
+    interval: 150
+    onTriggered: root.flushMusicOptions()
+  }
+
+  property FileView partyStatusFile: FileView {
+    path: root.stateHome + "/omarchy/hue-party/status.json"
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+    onLoaded: {
+      try {
+        var status = JSON.parse(text())
+        root.partyRooms = partyProc.running ? status.rooms || {} : {}
+        root.partyLightIds = partyProc.running ? status.lights || [] : []
+        root.musicRooms = partyProc.running ? status.musicRooms || {} : {}
+        root.musicBeats = partyProc.running ? status.musicBeats || {} : {}
+        root.musicTracking = partyProc.running ? status.musicTracking || {} : {}
+        root.partyError = partyProc.running ? status.error || "" : ""
+      } catch (e) { root.partyRooms = {} }
     }
+    onLoadFailed: root.partyRooms = {}
+  }
+
+  Process {
+    id: partyProc
+    command: ["python3", "-B", Qt.resolvedUrl("hue_party.py").toString().replace("file://", "")]
+    stdinEnabled: true
+    running: root.config !== null
+    onExited: {
+      root.partyRooms = {}
+      root.partyLightIds = []
+      root.musicRooms = {}
+      root.musicBeats = {}
+      root.musicTracking = {}
+      root.partyError = "Party Mode stopped; reconnecting…"
+    }
+    stderr: StdioCollector { }
+  }
+
+  Timer {
+    interval: 5000
+    repeat: true
+    running: root.config !== null && !partyProc.running
+    // Re-assert the binding instead of overwriting it: assigning a plain
+    // `true` would break `running: root.config !== null` and leave a stale
+    // worker (and its audio capture) alive after the configuration is lost.
+    onTriggered: partyProc.running = Qt.binding(function() { return root.config !== null })
   }
 
   Timer {
@@ -762,7 +920,7 @@ Panel {
               width: parent.width
               height: pairButton.implicitHeight + Style.space(16)
               radius: Style.space(8)
-              color: pairButtonMouse.containsMouse ? Qt.lighter(Color.accent, 1.2) : Color.accent
+              color: pairButtonMouse.containsMouse ? Qt.lighter(Commons.Color.accent, 1.2) : Commons.Color.accent
 
               Text {
                 id: pairButton
@@ -819,7 +977,7 @@ Panel {
             width: parent.width
             text: root.actionError || (root.fetchDiagnostic ? root.fetchDiagnostic.hint : "Check bridge power and network, then retry.")
             textFormat: Text.PlainText
-            color: Color.urgent
+            color: Commons.Color.urgent
             font.family: root.bar.fontFamily
             font.pixelSize: Style.font.caption
             wrapMode: Text.WordWrap
@@ -832,8 +990,8 @@ Panel {
             width: parent.width
             height: Style.space(40)
             radius: Style.cornerRadius
-            color: Style.controlFill(activeFocus, retryMouse.containsMouse, root.bar.foreground, Color.accent)
-            borderSpec: Border.controlSpec(activeFocus ? "focus" : (retryMouse.containsMouse ? "hover-cursor" : "normal"), root.bar.foreground, Color.accent)
+            color: Style.controlFill(activeFocus, retryMouse.containsMouse, root.bar.foreground, Commons.Color.accent)
+            borderSpec: Border.controlSpec(activeFocus ? "focus" : (retryMouse.containsMouse ? "hover-cursor" : "normal"), root.bar.foreground, Commons.Color.accent)
             activeFocusOnTab: true
             Accessible.role: Accessible.Button
             Accessible.name: "Retry Hue bridge connection now"
@@ -860,7 +1018,7 @@ Panel {
             visible: root.insecureMode
             width: parent.width
             text: "Bridge hostname verification unavailable. Re-run pair.sh to verify bridge identity."
-            color: Color.urgent
+            color: Commons.Color.urgent
             font.family: root.bar.fontFamily
             font.pixelSize: Style.font.caption
             wrapMode: Text.WordWrap
@@ -872,7 +1030,7 @@ Panel {
             label: "All lights"
             checked: root.allLightsOn
             foreground: root.bar.foreground
-            accent: Color.accent
+            accent: Commons.Color.accent
             fontFamily: root.bar.fontFamily
             onClicked: root.toggleAll(!root.allLightsOn)
           }
@@ -904,10 +1062,10 @@ Panel {
                        ? "#000000"
                        : Qt.rgba(roomHeader.roomTint.r, roomHeader.roomTint.g, roomHeader.roomTint.b,
                                  roomHeader.hot ? 0.45 : 0.30))
-                    : Style.controlFill(false, roomHeader.hot, root.bar.foreground, Color.accent)
+                    : Style.controlFill(false, roomHeader.hot, root.bar.foreground, Commons.Color.accent)
                   borderSpec: Border.controlSpec(
                     roomHeader.hot ? "hover-cursor" : "normal",
-                    root.bar.foreground, Color.accent)
+                    root.bar.foreground, Commons.Color.accent)
                   Behavior on color { ColorAnimation { duration: 100 } }
 
                   activeFocusOnTab: true
@@ -930,7 +1088,7 @@ Panel {
                     anchors.verticalCenter: parent.verticalCenter
                     checked: roomColumn.modelData.on
                     foreground: root.bar.foreground
-                    accent: Color.accent
+                    accent: Commons.Color.accent
                     interactive: true
                     onToggled: root.toggleRoom(roomColumn.modelData.id, !roomColumn.modelData.on)
                   }
@@ -951,7 +1109,7 @@ Panel {
                     Text {
                       anchors.centerIn: parent
                       text: root.favoriteRooms[roomColumn.modelData.id] === true ? "★" : "☆"
-                      color: root.favoriteRooms[roomColumn.modelData.id] === true ? Color.accent : root.bar.foreground
+                      color: root.favoriteRooms[roomColumn.modelData.id] === true ? Commons.Color.accent : root.bar.foreground
                       font.pixelSize: Style.font.body
                     }
                     MouseArea {
@@ -974,13 +1132,13 @@ Panel {
                       : Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.06)
                     border.width: 1
                     border.color: roomColumn.lightsOpen
-                      ? Color.accent
+                      ? Commons.Color.accent
                       : Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.28)
 
                     Text {
                       anchors.centerIn: parent
                       text: "\u25b8"
-                      color: roomColumn.lightsOpen ? Color.accent : Qt.darker(root.bar.foreground, 1.4)
+                      color: roomColumn.lightsOpen ? Commons.Color.accent : Qt.darker(root.bar.foreground, 1.4)
                       font.family: root.bar.fontFamily
                       font.pixelSize: Style.font.caption
                       rotation: roomColumn.lightsOpen ? 90 : 0
@@ -1054,7 +1212,7 @@ Panel {
                     label: "Theme Sync"
                     checked: root.themeSync[modelData.id] !== false
                     foreground: root.bar.foreground
-                    accent: Color.accent
+                    accent: Commons.Color.accent
                     fontFamily: root.bar.fontFamily
                     onClicked: {
                       var ts = JSON.parse(JSON.stringify(root.themeSync))
@@ -1074,7 +1232,7 @@ Panel {
                     label: "Scene Mode"
                     checked: root.roomSceneDefault(modelData.id)
                     foreground: root.bar.foreground
-                    accent: Color.accent
+                    accent: Commons.Color.accent
                     fontFamily: root.bar.fontFamily
                     onClicked: {
                       var ss = JSON.parse(JSON.stringify(root.sceneRooms))
@@ -1085,13 +1243,180 @@ Panel {
                   }
                 }
 
+                InlineToggle {
+                  visible: roomColumn.lightsOpen && HueApi.roomColorLightCount(roomColumn.modelData) > 0
+                  width: parent.width
+                  label: "Party Mode"
+                  description: "Theme colors flow between lights every 1.5 seconds"
+                  checked: root.partyOn(roomColumn.modelData.id)
+                  foreground: root.bar.foreground
+                  accent: Commons.Color.accent
+                  fontFamily: root.bar.fontFamily
+                  onClicked: root.toggleParty(roomColumn.modelData.id)
+                }
+
+                InlineToggle {
+                  visible: roomColumn.lightsOpen && HueApi.roomColorLightCount(roomColumn.modelData) > 0 && root.config !== null && root.config.entertainmentPaired === true
+                  width: parent.width
+                  label: "Music Sync"
+                  description: "Low between beats; rising to the peak on each tracked beat"
+                  checked: root.musicOn(roomColumn.modelData.id)
+                  foreground: root.bar.foreground
+                  accent: Commons.Color.accent
+                  fontFamily: root.bar.fontFamily
+                  onClicked: root.toggleMusic(roomColumn.modelData.id)
+                }
+
+                Text {
+                  objectName: "musicTracking-" + roomColumn.modelData.id
+                  visible: roomColumn.lightsOpen && root.musicOn(roomColumn.modelData.id)
+                  width: parent.width - Style.space(24)
+                  anchors.horizontalCenter: parent.horizontalCenter
+                  text: {
+                    var track = root.musicTracking[roomColumn.modelData.id] || {}
+                    if (track.locked) return "Rhythm locked · " + Math.round(track.bpm) + " BPM · confidence " + (track.confidence >= 0.5 ? "high" : "fair")
+                    return "Listening for rhythm…" + (track.bpm > 0 ? " · " + Math.round(track.bpm) + " BPM candidate" : "")
+                  }
+                  textFormat: Text.PlainText
+                  wrapMode: Text.WordWrap
+                  color: root.bar.foreground
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+
+                Text {
+                  objectName: "musicBeatCount-" + roomColumn.modelData.id
+                  visible: roomColumn.lightsOpen && root.musicOn(roomColumn.modelData.id)
+                  width: parent.width - Style.space(24)
+                  anchors.horizontalCenter: parent.horizontalCenter
+                  text: "Tracked beats: " + (root.musicBeats[roomColumn.modelData.id] || 0)
+                  textFormat: Text.PlainText
+                  color: root.bar.foreground
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+
+                Button {
+                  visible: roomColumn.lightsOpen && HueApi.roomColorLightCount(roomColumn.modelData) > 0 && root.config !== null && !root.config.entertainmentPaired
+                  width: parent.width
+                  text: "Pair music sync"
+                  focusable: true
+                  onClicked: Quickshell.execDetached(["omarchy-launch-terminal", "python3", "-B", Qt.resolvedUrl("hue_entertainment.py").toString().replace("file://", ""), "pair"])
+                }
+
+                Repeater {
+                  model: roomColumn.lightsOpen && root.musicOn(roomColumn.modelData.id) ? ["idle", "peak", "pace", "sensitivity", "timing"] : []
+                  Row {
+                    required property string modelData
+                    width: parent.width - Style.space(24)
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    spacing: Style.space(8)
+                    Text {
+                      width: Style.space(106)
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: ({idle: "Between beats", peak: "On beat", pace: "Pulse pace", sensitivity: "Sensitivity", timing: "Timing offset"})[parent.modelData]
+                      textFormat: Text.PlainText
+                      color: root.bar.foreground
+                      font.family: root.bar.fontFamily
+                      font.pixelSize: Style.font.caption
+                    }
+                    PanelSlider {
+                      objectName: "musicOption-" + parent.modelData
+                      width: parent.width - x - musicOptionValue.width - parent.spacing
+                      bar: root.bar
+                      minimum: parent.modelData === "timing" ? -0.3 : ((parent.modelData === "idle" || parent.modelData === "peak") ? 0 : 0.25)
+                      maximum: parent.modelData === "timing" ? 0.3 : ((parent.modelData === "idle" || parent.modelData === "peak") ? 1 : 2)
+                      step: parent.modelData === "timing" ? 0.01 : 0.05
+                      value: root.musicOption(roomColumn.modelData.id, parent.modelData)
+                      onMoved: function(value) { root.setMusicOption(roomColumn.modelData.id, parent.modelData, value) }
+                      onReleased: function(value) { root.setMusicOption(roomColumn.modelData.id, parent.modelData, value) }
+                    }
+                    Text {
+                      id: musicOptionValue
+                      objectName: "musicOptionValue-" + parent.modelData
+                      width: Style.space(58)
+                      anchors.verticalCenter: parent.verticalCenter
+                      horizontalAlignment: Text.AlignRight
+                      text: parent.modelData === "timing"
+                        ? Math.round(root.musicOption(roomColumn.modelData.id, parent.modelData) * 1000) + " ms"
+                        : parent.modelData === "pace"
+                        ? root.musicOption(roomColumn.modelData.id, parent.modelData).toFixed(2) + "×"
+                        : Math.round(root.musicOption(roomColumn.modelData.id, parent.modelData) * 100) + "%"
+                      textFormat: Text.PlainText
+                      color: root.bar.foreground
+                      font.family: root.bar.fontFamily
+                      font.pixelSize: Style.font.caption
+                    }
+                  }
+                }
+
+                Text {
+                  visible: roomColumn.lightsOpen && root.partyError !== "" && HueApi.roomColorLightCount(roomColumn.modelData) > 0
+                  width: parent.width - Style.space(24)
+                  anchors.horizontalCenter: parent.horizontalCenter
+                  text: root.partyError
+                  textFormat: Text.PlainText
+                  wrapMode: Text.WordWrap
+                  color: root.bar.foreground
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+
+                Column {
+                  visible: roomColumn.lightsOpen && HueApi.roomColorLightCount(roomColumn.modelData) > 1
+                  width: parent.width
+                  spacing: Style.space(2)
+                  property bool orderOpen: false
+                  Button {
+                    width: parent.width
+                    text: parent.orderOpen ? "Hide party light order" : "Arrange party light order"
+                    focusable: true
+                    onClicked: parent.orderOpen = !parent.orderOpen
+                  }
+                  Repeater {
+                    model: parent.orderOpen ? root.partyLights(roomColumn.modelData) : []
+                    Row {
+                      required property var modelData
+                      required property int index
+                      width: parent.width
+                      spacing: Style.space(4)
+                      Text {
+                        width: parent.width - Style.space(100)
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: (parent.index + 1) + ". " + parent.modelData.name
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                        color: root.bar.foreground
+                        font.family: root.bar.fontFamily
+                        font.pixelSize: Style.font.caption
+                      }
+                      Button {
+                        width: Style.space(44)
+                        text: "↑"
+                        focusable: true
+                        enabled: parent.index > 0
+                        Accessible.name: "Move light earlier"
+                        onClicked: root.movePartyLight(roomColumn.modelData, parent.index, -1)
+                      }
+                      Button {
+                        width: Style.space(44)
+                        text: "↓"
+                        focusable: true
+                        enabled: parent.index + 1 < root.partyLights(roomColumn.modelData).length
+                        Accessible.name: "Move light later"
+                        onClicked: root.movePartyLight(roomColumn.modelData, parent.index, 1)
+                      }
+                    }
+                  }
+                }
+
                 BorderSurface {
-                  visible: roomColumn.lightsOpen && root.roomSyncOn(roomColumn.modelData.id) && root.currentThemeName !== ""
+                  visible: roomColumn.lightsOpen && !root.partyOn(roomColumn.modelData.id) && root.roomSyncOn(roomColumn.modelData.id) && root.currentThemeName !== ""
                   width: parent.width
                   height: Style.space(42)
                   radius: Style.cornerRadius
-                  color: Style.controlFill(activeFocus, previewMouse.containsMouse, root.bar.foreground, Color.accent)
-                  borderSpec: Border.controlSpec(activeFocus ? "focus" : (previewMouse.containsMouse ? "hover-cursor" : "normal"), root.bar.foreground, Color.accent)
+                  color: Style.controlFill(activeFocus, previewMouse.containsMouse, root.bar.foreground, Commons.Color.accent)
+                  borderSpec: Border.controlSpec(activeFocus ? "focus" : (previewMouse.containsMouse ? "hover-cursor" : "normal"), root.bar.foreground, Commons.Color.accent)
                   activeFocusOnTab: true
                   Accessible.role: Accessible.Button
                   Accessible.name: "Preview current theme " + root.currentThemeName + " in " + roomColumn.modelData.name
@@ -1101,6 +1426,7 @@ Panel {
                   Text {
                     anchors.centerIn: parent
                     text: "Preview theme: " + root.currentThemeName
+                    textFormat: Text.PlainText
                     color: root.bar.foreground
                     font.family: root.bar.fontFamily
                     font.pixelSize: Style.font.body
@@ -1126,8 +1452,8 @@ Panel {
                     implicitHeight: Math.max(42, Style.font.body + Style.spacing.huge)
                     readonly property bool menuOpen: root.roomScenesExpanded(roomColumn.modelData.id)
                     readonly property bool hot: roomScenesMouse.containsMouse || activeFocus || menuOpen
-                    color: Style.controlFill(activeFocus, hot, root.bar.foreground, Color.accent)
-                    borderSpec: Border.controlSpec(activeFocus ? "focus" : (hot ? "hover-cursor" : "normal"), root.bar.foreground, Color.accent)
+                    color: Style.controlFill(activeFocus, hot, root.bar.foreground, Commons.Color.accent)
+                    borderSpec: Border.controlSpec(activeFocus ? "focus" : (hot ? "hover-cursor" : "normal"), root.bar.foreground, Commons.Color.accent)
 
                     activeFocusOnTab: true
                     Keys.onReturnPressed: root.toggleRoomScenes(roomColumn.modelData.id)
@@ -1164,7 +1490,7 @@ Panel {
                       anchors.rightMargin: parent.borderRight + Style.spacing.rowPaddingX
                       anchors.verticalCenter: parent.verticalCenter
                       text: "\u25b8"
-                      color: roomScenesHeader.menuOpen ? Color.accent : Qt.darker(root.bar.foreground, 1.4)
+                      color: roomScenesHeader.menuOpen ? Commons.Color.accent : Qt.darker(root.bar.foreground, 1.4)
                       font.family: root.bar.fontFamily
                       font.pixelSize: Style.font.body
                       rotation: roomScenesHeader.menuOpen ? 90 : 0
@@ -1190,7 +1516,7 @@ Panel {
                     light: modelData
                     controller: root
                     bar: root.bar
-                    themeSynced: root.roomSyncOn(roomColumn.modelData.id)
+                    themeSynced: root.roomSyncOn(roomColumn.modelData.id) || root.partyLightIds.indexOf(modelData.id) >= 0
                     pickerOpen: root.pickerOpenById[modelData.id] === true
                     visible: roomColumn.lightsOpen
                     width: parent.width
@@ -1235,7 +1561,7 @@ Panel {
               anchors.rightMargin: Style.space(10)
               y: Style.space(8) + (headerRow.height - height) / 2
               text: "\u25b8"
-              color: emptyRoomsHeaderMouse.containsMouse ? Color.accent : Qt.darker(root.bar.foreground, 1.4)
+              color: emptyRoomsHeaderMouse.containsMouse ? Commons.Color.accent : Qt.darker(root.bar.foreground, 1.4)
               font.family: root.bar.fontFamily
               font.pixelSize: Style.font.body
               rotation: emptyRoomsSection.expanded ? 90 : 0
@@ -1258,7 +1584,7 @@ Panel {
 
                 Text {
                   text: "Empty rooms"
-                  color: emptyRoomsHeaderMouse.containsMouse ? Color.accent : root.bar.foreground
+                  color: emptyRoomsHeaderMouse.containsMouse ? Commons.Color.accent : root.bar.foreground
                   font.family: root.bar.fontFamily
                   font.pixelSize: Style.font.body
                   font.bold: true
@@ -1299,7 +1625,7 @@ Panel {
                       label: modelData.name
                       checked: modelData.on
                       foreground: root.bar.foreground
-                      accent: Color.accent
+                      accent: Commons.Color.accent
                       fontFamily: root.bar.fontFamily
                       onClicked: root.toggleRoom(modelData.id, !modelData.on)
                     }
@@ -1310,7 +1636,7 @@ Panel {
                       label: "Theme Sync"
                       checked: root.themeSync[modelData.id] !== false
                       foreground: root.bar.foreground
-                      accent: Color.accent
+                      accent: Commons.Color.accent
                       fontFamily: root.bar.fontFamily
                       onClicked: {
                         var ts = JSON.parse(JSON.stringify(root.themeSync))

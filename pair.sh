@@ -317,11 +317,22 @@ if [[ "$REQUESTED_API" != "v1" ]]; then
 fi
 
 printf '%s\n%s\n%s\n%s\n' "$local_ip" "$bridge_id" "$username" "$api_version" | python3 -c "
-import json, os, sys
+import fcntl, json, os, sys
 bridge_ip, bridge_id, username, api_version = sys.stdin.read().splitlines()[:4]
 data = json.dumps({'bridgeIp': bridge_ip, 'bridgeId': bridge_id, 'username': username, 'apiVersion': api_version}, indent=2) + '\n'
 path = '''$STATE_FILE'''
 temporary = path + '.%d.tmp' % os.getpid()
+lock_fd = -1
+try:
+    # Same lock file as hue_client.credentials_guard: helper processes must
+    # not overwrite a concurrent pairing or migration.
+    lock_fd = os.open(os.path.join(os.path.dirname(path), '.hue-credentials.lock'),
+                      os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+except OSError:
+    if lock_fd >= 0:
+        os.close(lock_fd)
+    lock_fd = -1
 fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
 try:
     os.write(fd, data.encode())
@@ -330,6 +341,8 @@ finally:
     os.close(fd)
 os.replace(temporary, path)
 os.chmod(path, 0o600)
+if lock_fd >= 0:
+    os.close(lock_fd)
 " 2>/dev/null || {
   err "Could not write $STATE_FILE."
   exit 1
