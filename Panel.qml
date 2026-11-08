@@ -1426,6 +1426,7 @@ Panel {
                   Text {
                     anchors.centerIn: parent
                     text: "Preview theme: " + root.currentThemeName
+                    textFormat: Text.PlainText
                     color: root.bar.foreground
                     font.family: root.bar.fontFamily
                     font.pixelSize: Style.font.body
