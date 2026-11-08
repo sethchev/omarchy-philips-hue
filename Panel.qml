@@ -328,7 +328,7 @@ Panel {
 
   function musicOption(roomId, key) {
     var options = (root.musicOptions || {})[roomId] || {}
-    var defaults = { idle: 0.10, peak: 0.75, timing: 0, pace: 1, sensitivity: 1 }
+    var defaults = { idle: 0.10, peak: 0.75, intensity: 0.5, timing: 0, pace: 1, sensitivity: 1 }
     return options[key] === undefined ? defaults[key] : options[key]
   }
 
