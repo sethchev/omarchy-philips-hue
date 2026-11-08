@@ -152,9 +152,12 @@ class SmoothOutputTests(unittest.TestCase):
 class MusicOptionsTests(unittest.TestCase):
     def test_pace_saves_with_other_options_and_rejects_invalid_values(self):
         from test_party import cli
+        import hue_party as party
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'settings.json'
-            with mock.patch.object(hue, 'CONFIG_FILE', path), mock.patch.object(cli, 'CONFIG_FILE', path):
+            with mock.patch.object(hue, 'CONFIG_FILE', path), \
+                 mock.patch.object(cli, 'CONFIG_FILE', path), \
+                 mock.patch.object(party, 'DIRECTORY', Path(directory)):
                 hue.write_json_secure(path, {'scene': True, 'musicOptions': {}})
                 options = {'pace': 1.5, 'intensity': 0.7, 'sensitivity': 1.2, 'timing': -0.12}
                 cli.main(['hue-api.py', 'write-music-options', 'room', json.dumps(options)])
@@ -305,6 +308,22 @@ class MusicLifecycleTests(unittest.TestCase):
             music.MusicSession('4')
         self.started[6].assert_not_called()
         self.assertEqual([call.args[2]['action'] for call in self.client._request.call_args_list], ['start', 'stop'])
+
+    def test_lost_start_response_still_releases_the_entertainment_area(self):
+        # The bridge may have processed the start before the response was lost;
+        # cleanup must still send the matching stop.
+        self.client._request.side_effect = [hue.HueError('Bridge request timed out', 'timeout'), None]
+        with self.assertRaises(hue.HueError):
+            music.MusicSession('4')
+        self.assertEqual([call.args[2]['action'] for call in self.client._request.call_args_list],
+                         ['start', 'stop'])
+
+    def test_failure_before_start_does_not_send_a_stop(self):
+        with mock.patch.object(music, 'default_sink',
+                               side_effect=hue.HueError('No PipeWire playback output is available')):
+            with self.assertRaises(hue.HueError):
+                music.MusicSession('4')
+        self.client._request.assert_not_called()
 
     def test_capture_failure_does_not_prevent_releasing_stream(self):
         session = music.MusicSession('4')

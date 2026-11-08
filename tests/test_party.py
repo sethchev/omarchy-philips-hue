@@ -123,6 +123,41 @@ class PartyTests(unittest.TestCase):
             self.assertFalse(self.engine.sessions)
             factory.return_value.close.assert_called_once()
 
+    def test_master_toggle_control_id_stops_music_on_both_api_versions(self):
+        with mock.patch('hue_music.MusicSession') as factory:
+            self.state['allControlId'] = '0'
+            self.engine.start_music('room')
+            self.engine.stop_music_target('0')
+            self.assertFalse(self.engine.sessions)
+            factory.return_value.close.assert_called_once()
+        with mock.patch('hue_music.MusicSession') as factory:
+            self.state['allControlId'] = 'bridge-home-grouped-light'
+            self.engine.start_music('room')
+            self.engine.stop_music_target('bridge-home-grouped-light')
+            self.assertFalse(self.engine.sessions)
+            factory.return_value.close.assert_called_once()
+            # A room that merely contains the target light is unaffected when
+            # the ID matches nothing bridge-wide.
+            self.state['allControlId'] = ''
+            self.engine.start_music('room')
+            self.engine.stop_music_target('bridge-home-grouped-light')
+            self.assertTrue(self.engine.sessions)
+
+    def test_music_cleanup_failure_still_restores_brightness(self):
+        for light in self.state['lights'].values():
+            light['has_bri'] = True
+            light['state']['bri'] = 127
+        with mock.patch('hue_music.MusicSession') as factory:
+            self.engine.start_music('room')
+            for light in self.state['lights'].values():
+                light['state']['bri'] = 190
+            factory.return_value.close.side_effect = OSError('capture failed')
+            with self.assertRaises(OSError):
+                self.engine.stop('room', restore=False)
+        self.assertEqual([call.args[1] for call in self.client.put_light.call_args_list],
+                         [{'bri': 127}] * 3)
+        self.assertFalse(self.engine.sessions)
+
     def test_single_light_advances_at_each_one_point_five_seconds(self):
         self.state['groups']['room']['lights'] = ['1']
         self.engine.start('room')

@@ -107,6 +107,24 @@ class EntertainmentTests(unittest.TestCase):
         self.assertEqual(hue.read_json(self.path)['username'], 'changed')
         self.assertNotIn('entertainment', hue.read_json(self.path))
 
+    def test_final_compare_and_write_share_the_credential_lock(self):
+        events = []
+
+        @contextlib.contextmanager
+        def guard():
+            events.append('locked')
+            try:
+                yield
+            finally:
+                events.append('released')
+
+        with mock.patch.object(hue, 'HueClient'), \
+             mock.patch.object(entertainment.RegistrationClient, '_request', return_value=SUCCESS), \
+             mock.patch.object(hue, 'credentials_guard', guard):
+            entertainment.pair()
+        self.assertEqual(events, ['locked', 'released'])
+        self.assertIn('entertainment', hue.read_json(self.path))
+
     def test_saved_streaming_key_is_tied_to_its_bridge(self):
         saved = dict(NORMAL, entertainment={'username': USERNAME, 'clientKey': KEY, 'bridgeId': 'different'})
         with self.assertRaises(hue.HueError):

@@ -33,7 +33,13 @@ def main():
             deadline = time.monotonic() + args.seconds
             while time.monotonic() < deadline:
                 now = time.monotonic()
-                tracker.feed(capture.read(), now)
+                samples = capture.read()
+                # Match MusicSession.frame(): a discarded backlog invalidates
+                # the sample clock, so the tracker must start over.
+                if getattr(capture, 'discontinuous', False) is True:
+                    tracker.reset()
+                    capture.discontinuous = False
+                tracker.feed(samples, now)
                 if tracker.beats != previous_count:
                     print(json.dumps({'bpm': round(tracker.bpm, 1),
                         'confidence': round(tracker.confidence, 3), 'locked': tracker.locked}), flush=True)

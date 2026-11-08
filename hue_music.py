@@ -14,7 +14,7 @@ import hue_client as hue
 from hue_entertainment import entertainment_credentials
 from hue_beat import BeatTracker
 from hue_stream import Dtls, encode_frame
-from hue_transport import operation_deadline
+from hue_transport import DeadlineExceeded, operation_deadline
 
 FRAME_INTERVAL = 0.04
 COLOR_SLEW = 0.24
@@ -232,6 +232,9 @@ class MusicSession:
         self.client = hue.HueClient(credentials, api_version='v2')
         self.connection = self.capture = None
         self.activated = False
+        # The start request may reach the bridge and still fail with a timeout,
+        # so cleanup must attempt the matching stop even without a confirmation.
+        self.start_attempted = False
         self.sequence = 0
         self.room_id = room_id
         self.analyzer = None
@@ -254,6 +257,7 @@ class MusicSession:
         try:
             self.analyzer = Analyzer()
             sink = default_sink()
+            self.start_attempted = True
             self.client._request('PUT', self.path, {'action': 'start'})
             self.activated = True
             self.connection = Dtls(self.client.bridge_ip, credentials['username'], key)
@@ -333,12 +337,15 @@ class MusicSession:
             finally:
                 self.connection = None
                 try:
-                    if self.activated:
+                    if self.activated or self.start_attempted:
                         try:
                             with operation_deadline(5):
                                 self.client._request('PUT', self.path, {'action': 'stop'})
+                        except (hue.HueError, OSError, DeadlineExceeded):
+                            pass  # The bridge may be gone; the area times out on its own.
                         finally:
                             self.activated = False
+                            self.start_attempted = False
                 finally:
                     if self.analyzer:
                         self.analyzer.close()

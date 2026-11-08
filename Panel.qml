@@ -349,10 +349,17 @@ Panel {
 
   function flushMusicOptions() {
     var pending = root.pendingMusicOptions || {}
+    if (Object.keys(pending).length === 0) return
     root.pendingMusicOptions = {}
+    // Keep flushed values until their write completes: a config reload while
+    // the write is in flight must not revert the visible option.
+    var flushed = root.lightClone(root.flushedMusicOptions || {}, {})
     for (var roomId in pending) {
-      root.runAction(HueApi.apiCmd(["write-music-options", roomId, JSON.stringify(pending[roomId])]))
+      flushed[roomId] = pending[roomId]
+      root.runAction(HueApi.apiCmd(["write-music-options", roomId, JSON.stringify(pending[roomId])]),
+        { musicRooms: [roomId] })
     }
+    root.flushedMusicOptions = flushed
   }
 
   function toggleParty(roomId) {
@@ -380,7 +387,35 @@ Panel {
     var order = JSON.parse(JSON.stringify(root.partyOrder || {}))
     order[room.id] = ids
     root.partyOrder = order
-    root.runAction(HueApi.apiCmd(["write-party-order", room.id, JSON.stringify(ids)]))
+    // Retained across reloads until the queued write completes.
+    var pending = root.lightClone(root.pendingPartyOrder || {}, {})
+    pending[room.id] = ids
+    root.pendingPartyOrder = pending
+    root.runAction(HueApi.apiCmd(["write-party-order", room.id, JSON.stringify(ids)]),
+      { partyOrderRoom: room.id })
+  }
+
+  function applyThemeSettings(parsed) {
+    root.themeSync = parsed.themeSync || {}
+    root.favoriteRooms = parsed.favoriteRooms || {}
+    root.partyOrder = root.lightClone(parsed.partyOrder || {}, root.pendingPartyOrder || {})
+    root.musicOptions = root.lightClone(root.lightClone(parsed.musicOptions || {},
+      root.flushedMusicOptions || {}), root.pendingMusicOptions || {})
+    root.sceneRooms = parsed.sceneRooms || {}
+    root.sceneDefault = parsed.scene === true
+  }
+
+  function clearOptimistic(musicRooms, partyOrderRoom) {
+    if (musicRooms.length > 0) {
+      var flushed = root.lightClone(root.flushedMusicOptions || {}, {})
+      for (var i = 0; i < musicRooms.length; i++) delete flushed[musicRooms[i]]
+      root.flushedMusicOptions = flushed
+    }
+    if (partyOrderRoom) {
+      var pending = root.lightClone(root.pendingPartyOrder || {}, {})
+      delete pending[partyOrderRoom]
+      root.pendingPartyOrder = pending
+    }
   }
 
   function roomSyncOn(roomId) {
@@ -567,6 +602,9 @@ Panel {
   function tryCompleteAction() {
     if (!root.currentAction || !actionProc.actionExited || !actionProc.actionOutputFinished) return
     var context = root.currentAction.context
+    if (context.musicRooms || context.partyOrderRoom) {
+      root.clearOptimistic(context.musicRooms || [], context.partyOrderRoom)
+    }
     var failed = actionProc.actionExitCode !== 0
     if (failed) {
       var diagnostic = HueApi.connectionDiagnostic(actionProc.errorOutput, actionProc.actionExitCode, false)
@@ -616,8 +654,10 @@ Panel {
   property var musicTracking: ({})
   property var musicOptions: ({})
   property var pendingMusicOptions: ({})
+  property var flushedMusicOptions: ({})
   property var partyLightIds: []
   property var partyOrder: ({})
+  property var pendingPartyOrder: ({})
   property string partyError: ""
   property var sceneRooms: ({})
   property bool sceneDefault: false
@@ -628,26 +668,12 @@ Panel {
     onFileChanged: reload()
     onLoaded: {
       try {
-        var parsed = JSON.parse(text())
-        root.themeSync = parsed.themeSync || {}
-        root.favoriteRooms = parsed.favoriteRooms || {}
-        root.partyOrder = parsed.partyOrder || {}
-        root.musicOptions = root.lightClone(parsed.musicOptions || {}, root.pendingMusicOptions || {})
-        root.sceneRooms = parsed.sceneRooms || {}
-        root.sceneDefault = parsed.scene === true
+        root.applyThemeSettings(JSON.parse(text()))
       } catch (e) {
-        root.themeSync = {}
-        root.favoriteRooms = {}
-        root.sceneRooms = {}
-        root.sceneDefault = false
+        root.applyThemeSettings({})
       }
     }
-    onLoadFailed: {
-      root.themeSync = {}
-      root.favoriteRooms = {}
-      root.sceneRooms = {}
-      root.sceneDefault = false
-    }
+    onLoadFailed: root.applyThemeSettings({})
   }
 
   Timer {
@@ -695,7 +721,10 @@ Panel {
     interval: 5000
     repeat: true
     running: root.config !== null && !partyProc.running
-    onTriggered: partyProc.running = true
+    // Re-assert the binding instead of overwriting it: assigning a plain
+    // `true` would break `running: root.config !== null` and leave a stale
+    // worker (and its audio capture) alive after the configuration is lost.
+    onTriggered: partyProc.running = Qt.binding(function() { return root.config !== null })
   }
 
   Timer {

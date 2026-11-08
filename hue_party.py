@@ -157,13 +157,18 @@ class Party:
     def stop(self, room_id, restore=True):
         session = self.sessions.get(room_id)
         was_music = bool(session and session.get("music"))
+        cleanup_error = None
         try:
             if session and session.get("music"):
-                session["music"].close()
+                try:
+                    session["music"].close()
+                except BaseException as error:
+                    # Cleanup must not skip restoration; re-raised below.
+                    cleanup_error = error
         finally:
             self.sessions.pop(room_id, None)
             self.publish()
-        brightness_failures = []
+        failures = []
         if was_music:
             state = self.client.get_state()
             for key, original in session["original"].items():
@@ -172,28 +177,24 @@ class Party:
                     try:
                         self.client.put_light(light["api_id"], {"bri": original["state"]["bri"]}, light)
                     except hue.HueError as error:
-                        brightness_failures.append(error)
-        if not session or not restore:
-            if brightness_failures:
-                raise brightness_failures[0]
-            return
-        settings = hue.read_theme_config()
-        if settings.get("enabled", True) and settings.get("themeSync", {}).get(room_id, True):
-            hue.theme_sync(room_id=room_id)
-            if brightness_failures:
-                raise brightness_failures[0]
-            return
-        state = self.client.get_state()
-        failures = brightness_failures
-        for key, original in session["original"].items():
-            light = state["lights"].get(key, {})
-            if not light.get("state", {}).get("on") or not light.get("state", {}).get("reachable", True):
-                continue
-            try:
-                body = original_color(original)
-                self.client.put_light(light["api_id"], body, light)
-            except hue.HueError as error:
-                failures.append(error)
+                        failures.append(error)
+        if session and restore:
+            settings = hue.read_theme_config()
+            if settings.get("enabled", True) and settings.get("themeSync", {}).get(room_id, True):
+                hue.theme_sync(room_id=room_id)
+            else:
+                state = self.client.get_state()
+                for key, original in session["original"].items():
+                    light = state["lights"].get(key, {})
+                    if not light.get("state", {}).get("on") or not light.get("state", {}).get("reachable", True):
+                        continue
+                    try:
+                        body = original_color(original)
+                        self.client.put_light(light["api_id"], body, light)
+                    except hue.HueError as error:
+                        failures.append(error)
+        if cleanup_error is not None:
+            raise cleanup_error
         if failures:
             raise failures[0]
 
@@ -223,14 +224,18 @@ class Party:
         if not any(session.get("music") for session in self.sessions.values()):
             return
         state = self.client.get_state()
+        # The panel's master toggle uses the bridge-wide control ID (v1 "0" or
+        # the bridge-home grouped-light UUID on v2), so treat it as "all".
+        bridge_wide = target_id == "all" or target_id == str(state.get("allControlId") or "")
         members = set()
-        for key, group in state["groups"].items():
-            if target_id in (key, str(group.get("control_id") or key)):
-                members.update(group.get("lights", []))
-        members.update(key for key, light in state["lights"].items()
-                       if target_id in (key, str(light.get("api_id") or key)))
+        if not bridge_wide:
+            for key, group in state["groups"].items():
+                if target_id in (key, str(group.get("control_id") or key)):
+                    members.update(group.get("lights", []))
+            members.update(key for key, light in state["lights"].items()
+                           if target_id in (key, str(light.get("api_id") or key)))
         for room_id, session in list(self.sessions.items()):
-            if session.get("music") and (target_id == "all" or members.intersection(session["members"])):
+            if session.get("music") and (bridge_wide or members.intersection(session["members"])):
                 self.stop(room_id, restore=False)
 
     def has_music(self):

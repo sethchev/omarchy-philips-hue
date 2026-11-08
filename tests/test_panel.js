@@ -421,6 +421,33 @@ test('music sync uses the shared queue and preserves both room options', () => {
   assert.equal(h.actionProc.command[6], 'music-stop');
 });
 
+test('config reloads retain queued music and party order edits until their writes complete', () => {
+  const h = harness();
+  h.root.musicOptions = {};
+  h.root.pendingMusicOptions = {};
+  h.root.flushedMusicOptions = {};
+  h.root.partyOrder = {};
+  h.root.pendingPartyOrder = {};
+  h.root.setMusicOption('room', 'sensitivity', 1.5);
+  h.root.flushMusicOptions();                            // write A queued/in flight
+  h.root.setMusicOption('room', 'sensitivity', 1.75);    // newer edit still pending
+  const room = {id: 'room', lights: [{id: '2', hasColor: true}, {id: '1', hasColor: true}]};
+  h.root.movePartyLight(room, 1, -1);                    // order write queued
+  assert.deepEqual(Array.from(h.root.partyOrder.room), ['1', '2']);
+  // A reload triggered by another settings write must not drop queued edits.
+  h.root.applyThemeSettings({musicOptions: {}, partyOrder: {}});
+  assert.equal(h.root.musicOption('room', 'sensitivity'), 1.75);
+  assert.deepEqual(Array.from(h.root.partyOrder.room), ['1', '2']);
+  completeAction(h);                                     // music write A finishes
+  h.root.applyThemeSettings({musicOptions: {room: {sensitivity: 9}}, partyOrder: {}});
+  assert.equal(h.root.musicOption('room', 'sensitivity'), 1.75); // pending still wins
+  assert.equal(h.root.flushedMusicOptions.room, undefined);      // flushed override released
+  completeAction(h);                                     // order write B finishes
+  assert.equal(h.root.pendingPartyOrder.room, undefined);
+  h.root.applyThemeSettings({musicOptions: {}, partyOrder: {}});
+  assert.deepEqual(h.root.partyOrder.room, undefined);   // nothing optimistic remains
+});
+
 test('dragging music sliders batches the latest values and bounds pending writes', () => {
   const h = harness();
   h.root.musicOptions = {};

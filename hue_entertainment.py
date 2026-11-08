@@ -84,12 +84,15 @@ def pair(wait_seconds=90, clock=time.monotonic, sleep=time.sleep):
     # Validate the returned application key before touching existing credentials.
     with operation_deadline(8):
         hue.HueClient(separate, api_version="v2")._v2_data("/bridge")
-    current = hue.read_json(hue.CREDS_FILE)
-    if not isinstance(current, dict) or any(current.get(key) != original.get(key)
-            for key in ("bridgeIp", "bridgeId", "username", "apiVersion", "entertainment")):
-        raise hue.HueError("Pairing settings changed; Entertainment keys were not saved. Try again")
-    current["entertainment"] = saved
-    hue.write_json_secure(hue.CREDS_FILE, current)
+    # Hold the shared credential lock across the final compare-and-write so a
+    # concurrent pairing or migration cannot be overwritten by this snapshot.
+    with hue.credentials_guard():
+        current = hue.read_json(hue.CREDS_FILE)
+        if not isinstance(current, dict) or any(current.get(key) != original.get(key)
+                for key in ("bridgeIp", "bridgeId", "username", "apiVersion", "entertainment")):
+            raise hue.HueError("Pairing settings changed; Entertainment keys were not saved. Try again")
+        current["entertainment"] = saved
+        hue.write_json_secure(hue.CREDS_FILE, current)
 
 
 def main(argv=None):

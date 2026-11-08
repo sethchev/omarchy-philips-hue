@@ -23,6 +23,20 @@ from hue_client import (
 )
 
 
+def _update_config(update):
+    """Run a read-modify-write of the theme settings under the shared guard.
+
+    Two helpers (for example panels on multiple monitors) writing different
+    settings concurrently would otherwise atomically replace the file and
+    silently drop each other's changes.
+    """
+    from hue_party import write_guard
+    with write_guard():
+        config = read_theme_config()
+        update(config)
+        write_json_secure(CONFIG_FILE, config)
+
+
 def _config_map(key: str, raw: str):
     settings = json.loads(raw)
     if not isinstance(settings, dict):
@@ -30,9 +44,10 @@ def _config_map(key: str, raw: str):
     for resource_id, enabled in settings.items():
         if not re.fullmatch(r"[0-9A-Za-z_-]{1,64}", str(resource_id)) or not isinstance(enabled, bool):
             raise HueError("Invalid room setting")
-    config = read_theme_config()
-    config[key] = settings
-    write_json_secure(CONFIG_FILE, config)
+
+    def apply(config):
+        config[key] = settings
+    _update_config(apply)
 
 
 def main(argv: list[str]) -> int:
@@ -54,9 +69,10 @@ def main(argv: list[str]) -> int:
                 raise HueError("Invalid Music Sync option")
         if options.get("idle", 0.10) > options.get("peak", 0.75):
             raise HueError("Between-beat brightness must not exceed on-beat brightness")
-        config = read_theme_config()
-        config.setdefault("musicOptions", {})[room] = options
-        write_json_secure(CONFIG_FILE, config)
+
+        def apply(config):
+            config.setdefault("musicOptions", {})[room] = options
+        _update_config(apply)
         return 0
     if operation == "write-party-order" and len(argv) == 4:
         room, ids = argv[2], json.loads(argv[3])
@@ -64,9 +80,10 @@ def main(argv: list[str]) -> int:
             not isinstance(item, str) or not re.fullmatch(r"[0-9A-Za-z_-]{1,64}", item) for item in ids
         ) or len(set(ids)) != len(ids):
             raise HueError("Invalid party light order")
-        config = read_theme_config()
-        config.setdefault("partyOrder", {})[room] = ids
-        write_json_secure(CONFIG_FILE, config)
+
+        def apply(config):
+            config.setdefault("partyOrder", {})[room] = ids
+        _update_config(apply)
         return 0
     if operation == "write-theme-config" and len(argv) >= 3:
         _config_map("themeSync", argv[2])

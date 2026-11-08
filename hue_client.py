@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import colorsys
+import contextlib
+import fcntl
 import functools
 import http.client
 import json
@@ -26,6 +28,7 @@ CACERT = PLUGIN_DIR / "hue_bridge_cacert.pem"
 STATE_HOME = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state")
 CONFIG_HOME = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
 CREDS_FILE = STATE_HOME / "omarchy/settings/hue.json"
+CREDENTIALS_LOCK = CREDS_FILE.parent / ".hue-credentials.lock"
 CONFIG_FILE = CONFIG_HOME / "omarchy/settings/hue-theme.json"
 COLORS_FILE = STATE_HOME / "omarchy/current/theme/colors.toml"
 LOG_FILE = STATE_HOME / "omarchy/hue-theme-hook.log"
@@ -96,6 +99,31 @@ def _read_text_limited(path: Path, limit: int = _MAX_LOCAL_READ) -> str:
             os.close(fd)
     except OSError:
         return ""
+
+
+@contextlib.contextmanager
+def credentials_guard():
+    """Serialize credential read-modify-write cycles between helper processes.
+
+    Every writer of the credential file holds this lock across its final
+    read-compare-write so a concurrent pairing or migration cannot be
+    overwritten by a stale snapshot. If the lock file itself is unusable the
+    caller proceeds without it rather than breaking credential management.
+    """
+    handle = None
+    try:
+        CREDENTIALS_LOCK.parent.mkdir(parents=True, exist_ok=True)
+        handle = os.fdopen(os.open(CREDENTIALS_LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600), "r+")
+        fcntl.flock(handle, fcntl.LOCK_EX)
+    except OSError:
+        if handle:
+            handle.close()
+            handle = None
+    try:
+        yield
+    finally:
+        if handle:
+            handle.close()
 
 
 def read_json(path: Path, default=None):
@@ -754,14 +782,15 @@ def migrate_api(version: str) -> str:
     version = str(version).lower()
     if version not in ("v1", "v2"):
         raise HueError("API version must be v1 or v2")
-    creds = read_json(CREDS_FILE)
-    if not isinstance(creds, dict):
-        raise HueError("Hue bridge is not paired")
-    if not creds.get("bridgeId"):
-        creds["bridgeId"] = fetch_bridge_id(str(creds.get("bridgeIp") or ""))
-    HueClient(creds, version).verify()
-    creds["apiVersion"] = version
-    write_json_secure(CREDS_FILE, creds)
+    with credentials_guard():
+        creds = read_json(CREDS_FILE)
+        if not isinstance(creds, dict):
+            raise HueError("Hue bridge is not paired")
+        if not creds.get("bridgeId"):
+            creds["bridgeId"] = fetch_bridge_id(str(creds.get("bridgeIp") or ""))
+        HueClient(creds, version).verify()
+        creds["apiVersion"] = version
+        write_json_secure(CREDS_FILE, creds)
     return version
 
 
