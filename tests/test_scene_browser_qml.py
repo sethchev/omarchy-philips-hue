@@ -86,10 +86,21 @@ Window {
         search.textEdited()
       } else if (phase === 5) {
         var search = window.findSearch(browser)
-        if (browser.choiceCount !== 6 || browser.pageIndex !== 0 || search.visible) { Qt.exit(9); return }
+        if (browser.choiceCount !== 6 || browser.pageIndex !== 0 || search) { Qt.exit(9); return }
+        root.setSceneQuery("4", "Golden")
+      } else if (phase === 6) {
+        if (!window.findSearch(browser)) { Qt.exit(10); return }
+        browser.visible = false
+      } else if (phase === 7) {
+        if (window.findSearch(browser)) { Qt.exit(11); return }
+        browser.visible = true
+      } else if (phase === 8) {
+        var search = window.findSearch(browser)
+        if (!search || search.text !== "Golden") { Qt.exit(12); return }
+        root.setSceneQuery("4", "")
         root.scenes = []
       } else {
-        if (browser.choiceCount !== 4 || browser.pageIndex !== 0) { Qt.exit(7); return }
+        if (browser.choiceCount !== 4 || browser.pageIndex !== 0 || window.findSearch(browser)) { Qt.exit(7); return }
         Qt.quit()
       }
       phase++

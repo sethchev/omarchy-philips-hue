@@ -1499,12 +1499,17 @@ Panel {
                     }
                   }
 
-                  SceneBrowser {
-                    visible: roomScenesHeader.menuOpen
+                  Loader {
+                    objectName: "sceneBrowser-" + roomColumn.modelData.id
+                    // The retained panel must not retain native text inputs.
+                    active: root.opened && roomColumn.lightsOpen && roomScenesHeader.menuOpen
+                    visible: active
                     width: parent.width
-                    room: roomColumn.modelData
-                    controller: root
-                    bar: root.bar
+                    sourceComponent: SceneBrowser {
+                      room: roomColumn.modelData
+                      controller: root
+                      bar: root.bar
+                    }
                   }
                 }
 

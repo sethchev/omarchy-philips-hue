@@ -131,7 +131,43 @@ ShellRoot {
       if (panel.partyOrder.room.join(",") !== "2,1") { Qt.exit(4); return }
     }
   }
-  Timer { interval: 700; running: true; onTriggered: Qt.quit() }
+  Timer {
+    property int phase: -6
+    interval: 100; repeat: true; running: true
+    onTriggered: {
+      if (phase < 0) { phase++; return }
+      var loader = findObject(panel, "sceneBrowser-room")
+      if (!loader) { Qt.exit(12); return }
+      if (phase === 0) {
+        if (loader.item) { Qt.exit(13); return }
+        panel.expandedSceneMenus = ({room:true})
+        panel.sceneQueries = ({room:"Golden"})
+      } else if (phase === 1) {
+        // A remembered open menu must remain unloaded while the panel is closed.
+        if (loader.item) { Qt.exit(14); return }
+        panel.open()
+      } else if (phase === 2) {
+        if (!loader.item) { Qt.exit(15); return }
+        panel.close()
+      } else if (phase === 3) {
+        if (loader.item) { Qt.exit(16); return }
+        panel.open()
+      } else if (phase === 4) {
+        if (!loader.item || panel.sceneQueries.room !== "Golden") { Qt.exit(17); return }
+        panel.expandedRooms = ({})
+      } else if (phase === 5) {
+        if (loader.item) { Qt.exit(18); return }
+        panel.expandedRooms = ({room:true})
+      } else if (phase === 6) {
+        if (!loader.item) { Qt.exit(19); return }
+        panel.expandedSceneMenus = ({})
+      } else {
+        if (loader.item) { Qt.exit(20); return }
+        Qt.quit()
+      }
+      phase++
+    }
+  }
 }
 ''')
             (plugin / 'hue-api.py').write_text(
