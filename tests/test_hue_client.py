@@ -144,6 +144,39 @@ class HueClientTests(unittest.TestCase):
         with self.assertRaises(hue_client.HueError):
             client.get_snapshot()
 
+    def test_v2_snapshot_rejects_excess_resources_and_memberships(self):
+        light, room, _grouped = V2_RESOURCES
+        scene = {"type": "scene", "id": "scene", "group": {"rtype": "room", "rid": room["id"]}}
+        lights = [dict(light, id_v1=f"/lights/{i}") for i in range(1, 193)]
+        overlapping = [dict(room, id_v1=f"/groups/{i}") for i in range(1, 4)]
+        for resources, limit in (
+            ([{"type": "device"}] * 4097, "v2 resource count"),
+            ([light] * 193, "light count"),
+            ([room] * 32 + [dict(room, type="zone")] * 33, "group count"),
+            ([scene] * 513, "scene count"),
+            ([light, dict(room, children=room["children"] * 257)], "group membership"),
+            (lights + overlapping, "total group membership"),
+            ([dict(light, metadata={"name": "🌈" * 65})], "resource name length"),
+        ):
+            with self.subTest(limit=limit):
+                client = hue_client.HueClient(self.creds())
+                client._request = mock.Mock(return_value={"data": resources})
+                with self.assertRaisesRegex(hue_client.HueError, limit) as raised:
+                    client.get_snapshot()
+                self.assertEqual(raised.exception.code, "response")
+
+        client = hue_client.HueClient(self.creds())
+        client._request = mock.Mock(return_value={"data": lights + overlapping[:2]})
+        state = client.get_snapshot()
+        self.assertEqual(len(state["lights"]), 192)
+        self.assertEqual([len(room["lights"]) for room in state["groups"].values()], [192, 192])
+
+        client._request.return_value = {"data": lights + overlapping}
+        self.assertEqual(len(client.get_state()["groups"]), 3)
+        client._create_scene = mock.Mock(return_value="scene")
+        client.recall_scene = mock.Mock()
+        self.assertEqual(client.apply_prebuilt_scene("Read", "1"), (1, 1))
+
     def test_master_write_deduplicates_ids_and_continues_after_failure(self):
         client = hue_client.HueClient(self.creds("v1"))
         client.put_light = mock.Mock(side_effect=[hue_client.HueError("Unreachable"), None])
@@ -308,7 +341,7 @@ class HueClientTests(unittest.TestCase):
                 "group_api_id": V2_RESOURCES[1]["id"],
             }
         }
-        client.get_snapshot = lambda: dict(client.get_state(), scenes=client.get_scenes())
+        client._read_snapshot = lambda: dict(client.get_state(), scenes=client.get_scenes())
         recalled = []
         client.recall_scene = lambda sid, group_id=None: recalled.append((sid, group_id))
         client._create_scene = mock.Mock()
@@ -320,7 +353,7 @@ class HueClientTests(unittest.TestCase):
         client = hue_client.HueClient(self.creds())
         client.get_state = lambda: client._normalize_v2(V2_RESOURCES)
         client.get_scenes = lambda: {}
-        client.get_snapshot = lambda: dict(client.get_state(), scenes=client.get_scenes())
+        client._read_snapshot = lambda: dict(client.get_state(), scenes=client.get_scenes())
         created_id = "55555555-5555-4555-8555-555555555555"
         client._create_scene = mock.Mock(return_value=created_id)
         recalled = []
@@ -337,7 +370,7 @@ class HueClientTests(unittest.TestCase):
         state["groups"]["5"] = other_room
         client.get_state = lambda: state
         client.get_scenes = lambda: {}
-        client.get_snapshot = lambda: dict(client.get_state(), scenes=client.get_scenes())
+        client._read_snapshot = lambda: dict(client.get_state(), scenes=client.get_scenes())
         client._create_scene = mock.Mock(return_value="55555555-5555-4555-8555-555555555555")
         client.recall_scene = mock.Mock()
         self.assertEqual(client.apply_prebuilt_scene("Read", "4"), (1, 1))

@@ -221,7 +221,7 @@ Panel {
     }
     var orphans = []
     for (var id in root.lightsById) {
-      if (!used[id]) orphans.push(root.lightsById[id])
+      if (Object.prototype.hasOwnProperty.call(root.lightsById, id) && !used[id]) orphans.push(root.lightsById[id])
     }
     root.roomsWithLights = result
     root.orphanLights = orphans
@@ -1514,7 +1514,7 @@ Panel {
                 }
 
                 Repeater {
-                  model: modelData.lights
+                  model: roomColumn.lightsOpen ? roomColumn.modelData.lights : []
 
                   LightControls {
                     required property var modelData
@@ -1523,7 +1523,6 @@ Panel {
                     bar: root.bar
                     themeSynced: root.roomSyncOn(roomColumn.modelData.id) || root.partyLightIds.indexOf(modelData.id) >= 0
                     pickerOpen: root.pickerOpenById[modelData.id] === true
-                    visible: roomColumn.lightsOpen
                     width: parent.width
                   }
                 }

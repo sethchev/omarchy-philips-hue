@@ -97,6 +97,50 @@ class DiagnosticTests(unittest.TestCase):
                         self.assertTrue(output.getvalue().startswith('Hue error: '))
                     self.assertNotIn('Traceback', output.getvalue())
 
+    def test_cli_rejects_oversized_v1_snapshots_without_publishing(self):
+        light = {"name": "x", "state": {"on": True}}
+        group = {"name": "Room", "lights": ["1"] * 256, "state": {}}
+        scene = {"name": "Read", "group": "1"}
+        for path, payload in (
+            ("/lights", {str(i): light for i in range(1, 100_001)}),
+            ("/groups", {str(i): group for i in range(65)}),
+            ("/scenes", {str(i): scene for i in range(513)}),
+            ("/groups", {"1": dict(group, lights=["1"] * 257)}),
+            ("/groups", {"1": group, "2": group, "3": dict(group, lights=["1"])}),
+            ("/lights", {"1": dict(light, name="🌈" * 65)}),
+            ("/groups", {"1": dict(group, name="x" * 129)}),
+            ("/scenes", {"1": dict(scene, name="x" * 129)}),
+            ("/lights", {"1": dict(light, extra="x" * 524_288)}),
+        ):
+            with self.subTest(path=path, rows=len(payload)):
+                self.assertLess(len(json.dumps(payload)), hue_client._MAX_RESPONSE_BYTES)
+                client = hue_client.HueClient(fixtures.HueClientTests().creds("v1"))
+                client._request = mock.Mock(side_effect=lambda _method, url: payload if url == path else {})
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with mock.patch.object(cli, "HueClient", return_value=client), \
+                        contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    self.assertEqual(cli.run(["hue-api.py", "get-state", "--json-errors"]), 1)
+                self.assertEqual(stdout.getvalue(), "")
+                self.assertEqual(json.loads(stderr.getvalue())["error"]["code"], "response")
+
+    def test_cli_snapshot_wire_limit_includes_the_newline(self):
+        client = hue_client.HueClient(fixtures.HueClientTests().creds("v1"))
+        light = {"state": {"on": True}, "extra": ""}
+        client._request = mock.Mock(side_effect=lambda _method, path: {"1": light} if path == "/lights" else {})
+        baseline = json.dumps(client.get_snapshot()) + "\n"
+        limit = hue_client._MAX_SNAPSHOT_BYTES
+        for excess in (0, 1):
+            light["extra"] = "x" * (limit - len(baseline) + excess)
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with mock.patch.object(cli, "HueClient", return_value=client), \
+                    contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                self.assertEqual(cli.run(["hue-api.py", "get-state", "--json-errors"]), excess)
+            if excess:
+                self.assertEqual(stdout.getvalue(), "")
+                self.assertEqual(json.loads(stderr.getvalue())["error"]["code"], "response")
+            else:
+                self.assertEqual(len(stdout.getvalue().encode("ascii")), limit)
+
     def test_cli_recalls_bridge_scene_by_id_with_group_for_v1_and_v2(self):
         for version in ('v1', 'v2'):
             with self.subTest(version=version):

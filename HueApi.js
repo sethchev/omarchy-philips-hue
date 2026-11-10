@@ -1,5 +1,14 @@
 var API = Qt.resolvedUrl("hue-api.py").toString().replace("file://", "")
 
+// Match the Python producer. Its stdout is ASCII JSON followed by a newline.
+var maxSnapshotSize = 524288
+var maxLights = 192
+var maxGroups = 64
+var maxScenes = 512
+var maxGroupMembers = 256
+var maxTotalMembers = 512
+var maxNameLength = 128
+
 function apiCmd(args) {
   var cmd = ["python3", API]
   for (var i = 0; i < args.length; i++) cmd.push(String(args[i]))
@@ -91,27 +100,47 @@ function isObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value)
 }
 
+function isValidResourceName(name) {
+  return name === undefined || name === null || (typeof name === "string" && name.length <= maxNameLength)
+}
+
+function isValidSnapshotId(id) {
+  return (typeof id === "string" || Number.isSafeInteger(id)) && isValidId(id) &&
+    !Object.prototype.hasOwnProperty.call(Object.prototype, id)
+}
+
 function parseSnapshot(text) {
+  if (typeof text !== "string" || text.length > maxSnapshotSize) return null
   try {
     var raw = JSON.parse(text)
     if (!isObject(raw) || !isObject(raw.lights) || !isObject(raw.groups) || !isObject(raw.scenes)) return null
-    if (raw.allControlId !== undefined && raw.allControlId !== "" && !isValidId(raw.allControlId)) return null
+    if (Object.keys(raw.lights).length > maxLights || Object.keys(raw.groups).length > maxGroups ||
+        Object.keys(raw.scenes).length > maxScenes) return null
+    if (raw.allControlId !== undefined && raw.allControlId !== "" && !isValidSnapshotId(raw.allControlId)) return null
     var numericKeys = ["bri", "ct", "hue", "sat"]
     for (var id in raw.lights) {
       var light = raw.lights[id]
-      if (!isValidId(id) || !isObject(light) || !isObject(light.state) || typeof light.state.on !== "boolean") return null
+      if (!isValidSnapshotId(id) || !isObject(light) || !isObject(light.state) || typeof light.state.on !== "boolean") return null
+      if (!isValidResourceName(light.name)) return null
       var state = light.state
       for (var i = 0; i < numericKeys.length; i++) {
         var key = numericKeys[i]
         if (state[key] !== undefined && (typeof state[key] !== "number" || !isFinite(state[key]))) return null
       }
     }
+    // A light can be represented by more than one room or zone delegate.
+    var totalMembers = 0
     for (var groupId in raw.groups) {
       var group = raw.groups[groupId]
-      if (!isValidId(groupId) || !isObject(group) || !Array.isArray(group.lights) || !isObject(group.state)) return null
+      if (!isValidSnapshotId(groupId) || !isObject(group) || !Array.isArray(group.lights) || !isObject(group.state)) return null
+      if (!isValidResourceName(group.name) || group.lights.length > maxGroupMembers) return null
+      totalMembers += group.lights.length
+      if (totalMembers > maxTotalMembers) return null
+      if (!group.lights.every(isValidSnapshotId)) return null
     }
     for (var sceneId in raw.scenes) {
-      if (!isValidId(sceneId) || !isObject(raw.scenes[sceneId])) return null
+      var scene = raw.scenes[sceneId]
+      if (!isValidSnapshotId(sceneId) || !isObject(scene) || !isValidResourceName(scene.name)) return null
     }
     var lights = parseLights(raw.lights)
     var byId = {}
@@ -166,8 +195,8 @@ function parseScenes(text) {
 function roomLights(room, byId) {
   var result = []
   for (var i = 0; i < room.lightIds.length; i++) {
-    var light = byId[room.lightIds[i]]
-    if (light) result.push(light)
+    var id = room.lightIds[i]
+    if (Object.prototype.hasOwnProperty.call(byId, id)) result.push(byId[id])
   }
   return result
 }

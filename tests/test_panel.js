@@ -358,6 +358,66 @@ test('watchdog and malformed successful output produce distinct diagnostics', ()
   assert.match(h.root.actionError, /TLS connection failed/);
 });
 
+test('oversized snapshots are rejected before publishing delegate models', () => {
+  const h = harness(); load(h);
+  const modelKeys = ['lightsById', 'rooms', 'scenes', 'allControlId', 'roomsWithLights', 'orphanLights'];
+  const oldModels = modelKeys.map(key => h.root[key]);
+  const entries = (count, row) => Object.fromEntries(Array.from({length: count}, (_, i) => [i + 1, row]));
+  const light = {state: {on: true}};
+  const room = {type: 'Room', lights: Array(256).fill('1'), state: {}};
+  const raw = {lights: {}, groups: {}, scenes: {}, allControlId: 'replacement'};
+  for (const changes of [
+    {lights: entries(193, light)},
+    {groups: entries(65, {...room, lights: []})},
+    {scenes: entries(513, {})},
+    {groups: {1: {...room, lights: Array(257).fill('1')}}},
+    {groups: {1: room, 2: room, 3: {...room, lights: ['1']}}},
+    {lights: {1: {...light, name: '🌈'.repeat(65)}}},
+    {groups: {1: {...room, name: 'x'.repeat(129)}}},
+    {scenes: {1: {name: 'x'.repeat(129)}}},
+    {extra: 'x'.repeat(524288)}
+  ]) {
+    h.root.refresh(); h.flush();
+    Object.assign(h.stateProc, {
+      fetchOutput: JSON.stringify({...raw, ...changes}), fetchOutputFinished: true,
+      fetchErrorFinished: true, fetchExited: true, fetchExitCode: 0
+    });
+    h.root.tryCompleteFetch(h.stateProc);
+    assert.equal(h.root.fetchDiagnostic.code, 'response');
+    modelKeys.forEach((key, i) => assert.equal(h.root[key], oldModels[i]));
+  }
+  assert.ok(h.HueApi.parseSnapshot(JSON.stringify({
+    ...raw, lights: entries(192, {...light, name: '🌈'.repeat(64)}), groups: {1: room, 2: room}
+  })));
+  const json = JSON.stringify(raw);
+  const atLimit = json + ' '.repeat(524288 - json.length - 1) + '\n';
+  assert.ok(h.HueApi.parseSnapshot(atLimit));
+  assert.equal(h.HueApi.parseSnapshot(atLimit + '\n'), null);
+});
+
+test('snapshot IDs and group references cannot address inherited properties', () => {
+  const h = harness(); load(h);
+  const oldRooms = h.root.roomsWithLights;
+  const oldOrphans = h.root.orphanLights;
+  for (const id of ['__proto__', 'constructor', ['1']]) {
+    const data = JSON.parse(snapshot());
+    if (id === '__proto__') {
+      Object.defineProperty(data.lights, id, {value: data.lights['1'], enumerable: true});
+    } else {
+      data.groups['4'].lights.push(id);
+    }
+    h.root.refresh(); h.flush();
+    Object.assign(h.stateProc, {
+      fetchOutput: JSON.stringify(data), fetchOutputFinished: true,
+      fetchErrorFinished: true, fetchExited: true, fetchExitCode: 0
+    });
+    h.root.tryCompleteFetch(h.stateProc);
+    assert.equal(h.root.fetchDiagnostic.code, 'response');
+    assert.equal(h.root.roomsWithLights, oldRooms);
+    assert.equal(h.root.orphanLights, oldOrphans);
+  }
+});
+
 test('party commands are serialized and light order persists through the settings queue', () => {
   const h = harness();
   h.root.partyRooms = {};
