@@ -19,6 +19,11 @@ import hue_client
 import hue_transport
 
 
+def pairing_http_scripts():
+    scripts = re.findall(r"python3 - <<'PY'[^\n]*\n(.*?)\nPY", (ROOT / 'pair.sh').read_text(), re.S)
+    return [script for script in scripts if 'no_redirect_opener' in script]
+
+
 class TrackedBody(io.BytesIO):
     def __init__(self, content):
         super().__init__(content)
@@ -100,7 +105,7 @@ class RedirectTests(unittest.TestCase):
                 self.assert_rejected_without_reading_or_following()
 
     def test_pairing_discovery_bridge_id_probe_and_post_reject_redirects(self):
-        scripts = re.findall(r"python3 - <<'PY'[^\n]*\n(.*?)\nPY", (ROOT / 'pair.sh').read_text(), re.S)
+        scripts = pairing_http_scripts()
         self.assertEqual(len(scripts), 4)
         env = {'HUE_PLUGIN_DIR': str(ROOT), 'CACERT': str(hue_client.CACERT),
                'TARGET_IP': '192.0.2.10', 'BRIDGE_ID': '001788fffe123456',
@@ -124,7 +129,7 @@ class RedirectTests(unittest.TestCase):
         self.assertEqual(FixtureHTTPSHandler.bodies[0].read_sizes, [hue_client._MAX_RESPONSE_BYTES + 1])
 
     def test_normal_pairing_and_discovery_responses_keep_their_size_cap(self):
-        scripts = re.findall(r"python3 - <<'PY'[^\n]*\n(.*?)\nPY", (ROOT / 'pair.sh').read_text(), re.S)
+        scripts = pairing_http_scripts()
         replies = [
             [{'internalipaddress': '192.0.2.10'}], {'bridgeid': '001788fffe123456'},
             {'errors': [], 'data': []}, [{'success': {'username': 'fixture-key'}}],
@@ -132,7 +137,7 @@ class RedirectTests(unittest.TestCase):
         env = {'HUE_PLUGIN_DIR': str(ROOT), 'CACERT': str(hue_client.CACERT),
                'TARGET_IP': '192.0.2.10', 'BRIDGE_ID': '001788fffe123456',
                'HUE_APPLICATION_KEY': 'fixture-key', 'DEVICETYPE': 'philips#fixture'}
-        for script, reply in zip(scripts, replies):
+        for script, reply in zip(scripts, replies, strict=True):
             with self.subTest(reply=reply):
                 self.configure(200, json.dumps(reply).encode())
                 with mock.patch.dict(os.environ, env), mock.patch.object(socket, 'getaddrinfo', socket.getaddrinfo), contextlib.redirect_stdout(io.StringIO()):

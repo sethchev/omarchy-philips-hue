@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import array
 import colorsys
+import locale
 import math
 import os
 import shutil
@@ -14,7 +15,7 @@ import hue_client as hue
 from hue_entertainment import entertainment_credentials
 from hue_beat import BeatTracker
 from hue_stream import Dtls, encode_frame
-from hue_transport import DeadlineExceeded, operation_deadline
+from hue_transport import DeadlineExceeded, OutputLimitExceeded, operation_deadline, read_command_output
 
 FRAME_INTERVAL = 0.04
 COLOR_SLEW = 0.24
@@ -56,12 +57,14 @@ def default_sink():
     if not shutil.which('pactl') or not shutil.which('pw-cat'):
         raise hue.HueError('Music Sync requires pw-cat and pactl (PipeWire/PulseAudio tools)')
     try:
-        result = subprocess.run(['pactl', 'get-default-sink'], capture_output=True,
-                                text=True, timeout=2, check=True)
-    except (OSError, subprocess.SubprocessError):
+        output = read_command_output(['pactl', 'get-default-sink'], timeout=2,
+                                     stdout_limit=4096, stderr_limit=4096)
+        sink = output.decode(locale.getpreferredencoding(False)).strip()
+    except OutputLimitExceeded:
+        raise hue.HueError('PipeWire playback output exceeded the size limit') from None
+    except (OSError, subprocess.SubprocessError, UnicodeError):
         raise hue.HueError('Could not find the PipeWire playback output') from None
-    sink = result.stdout.strip()
-    if not sink or len(sink) > 1024 or '\n' in sink:
+    if not sink or len(sink) > 1024 or any(char in sink for char in '\n\r\0'):
         raise hue.HueError('No PipeWire playback output is available')
     return sink
 

@@ -7,10 +7,15 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from hue_transport import DeadlineExceeded, operation_deadline
+from hue_transport import DeadlineExceeded, operation_deadline, read_command_output
 
 
 class DeadlineTests(unittest.TestCase):
+    def test_command_deadline_applies_even_after_pipes_close(self):
+        command = [sys.executable, '-c', 'import os, time; os.close(1); os.close(2); time.sleep(2)']
+        with self.assertRaises(subprocess.TimeoutExpired):
+            read_command_output(command, timeout=0.1, stdout_limit=16, stderr_limit=16)
+
     def test_deadline_interrupts_repeated_short_waits(self):
         handler = signal.getsignal(signal.SIGALRM)
         started = time.monotonic()

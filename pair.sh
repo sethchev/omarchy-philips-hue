@@ -49,19 +49,25 @@ valid_ip() {
 }
 
 discover_bridge_local() {
-  local out ip bridgeid
-  out=$(timeout 5 avahi-browse -t -r _hue._tcp 2>/dev/null || true)
-  [[ -z "$out" ]] && return 1
-  read -r ip bridgeid <<<"$(python3 -c "
-import re, sys
-text = sys.stdin.read()
+  HUE_PLUGIN_DIR="$PLUGIN_DIR" python3 - <<'PY' 2>/dev/null
+import os, re, subprocess, sys
+sys.path.insert(0, os.environ["HUE_PLUGIN_DIR"])
+from hue_transport import read_command_output
+try:
+    # Avahi can resolve a bridge before another device's lookup times out.
+    output = read_command_output(["avahi-browse", "-t", "-r", "_hue._tcp"],
+                                 timeout=5, stdout_limit=65536, stdout_rows=512,
+                                 allow_partial=True)
+except (OSError, subprocess.SubprocessError):
+    raise SystemExit(1)
+text = output.decode("utf-8", "replace")
 ips = re.findall(r'address = \[([^]]+)\]', text)
 ipv4 = [addr for addr in ips if ':' not in addr]
 ids = re.findall(r'bridgeid=([0-9a-fA-F]{16})', text)
-print((ipv4[0] if ipv4 else (ips[0] if ips else '')), (ids[0].lower() if ids else ''))
-" <<<"$out")"
-  [[ -n "$ip" ]] || return 1
-  printf '%s\t%s\n' "$ip" "$bridgeid"
+if not ips:
+    raise SystemExit(1)
+print((ipv4 or ips)[0], ids[0].lower() if ids else '', sep="\t")
+PY
 }
 
 discover_bridge_cloud() {
