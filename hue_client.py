@@ -35,6 +35,15 @@ LOG_FILE = STATE_HOME / "omarchy/hue-theme-hook.log"
 
 _MAX_LOCAL_READ = 1_048_576  # 1 MiB
 _MAX_RESPONSE_BYTES = 16_777_216  # 16 MiB
+# Keep the panel's model limits in HueApi.js in sync with these.
+_MAX_SNAPSHOT_BYTES = 524_288  # 512 KiB, including the CLI newline
+_MAX_LIGHTS = 192  # Above the Hue Bridge Pro's 186-light hard limit
+_MAX_GROUPS = 64
+_MAX_SCENES = 512
+_MAX_GROUP_MEMBERS = 256
+_MAX_TOTAL_MEMBERS = 512
+_MAX_NAME_LENGTH = 128  # UTF-16 code units, as measured by QML/JavaScript
+_MAX_V2_RESOURCES = 4096
 
 _SAFE_ID = re.compile(r"^[0-9A-Za-z_-]{1,64}$")
 _UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F-]{27,36}$")
@@ -53,13 +62,29 @@ class HueError(RuntimeError):
         self.code = code
 
 
+def _check_limit(count: int, limit: int, description: str) -> None:
+    if count > limit:
+        raise HueError("Bridge exceeded the %s limit" % description, "response")
+
+
+def _bounded_name(name, fallback: str = "") -> str:
+    if name is None or name == "":
+        name = fallback
+    if not isinstance(name, str):
+        raise HueError("Bridge returned an invalid resource name", "response")
+    _check_limit(len(name), _MAX_NAME_LENGTH, "resource name length")
+    _check_limit(len(name.encode("utf-16-le", "surrogatepass")) // 2,
+                 _MAX_NAME_LENGTH, "resource name length")
+    return name
+
+
 def _normalized_response(function):
     """Treat malformed resource shapes as response errors, without raw data."""
     @functools.wraps(function)
     def normalize(*args, **kwargs):
         try:
             return function(*args, **kwargs)
-        except (AttributeError, KeyError, TypeError, ValueError, OverflowError) as error:
+        except (AttributeError, KeyError, TypeError, ValueError, OverflowError, RecursionError) as error:
             raise HueError("Bridge returned malformed resource data", "response") from error
     return normalize
 
@@ -367,6 +392,7 @@ class HueClient:
         data = result.get("data") if isinstance(result, dict) else None
         if not isinstance(data, list):
             raise HueError("Invalid Hue v2 response", "response")
+        _check_limit(len(data), _MAX_V2_RESOURCES, "v2 resource count")
         return data
 
     def get_state(self) -> dict:
@@ -374,8 +400,9 @@ class HueClient:
             return self._get_v1_state()
         return self._normalize_v2(self._v2_data())
 
-    def get_snapshot(self) -> dict:
-        """Fetch a complete panel snapshot without repeating resource reads."""
+    @_normalized_response
+    def _read_snapshot(self) -> dict:
+        """Fetch lights, groups and scenes without repeating resource reads."""
         if self.api_version == "v1":
             state = self._get_v1_state()
             state["scenes"] = self._normalize_v1_scenes(
@@ -384,6 +411,20 @@ class HueClient:
             resources = self._v2_data()
             state = self._normalize_v2(resources)
             state["scenes"] = self._normalize_v2_scenes(resources)
+        return state
+
+    @_normalized_response
+    def get_snapshot(self) -> dict:
+        """Fetch a complete snapshot within the panel's model and wire budgets."""
+        state = self._read_snapshot()
+        total_members = sum(len(group.get("lights", [])) for group in state["groups"].values())
+        _check_limit(total_members, _MAX_TOTAL_MEMBERS, "total group membership")
+        # Match the CLI's ASCII JSON encoding and stop once the wire budget
+        # is exhausted, including when v1 records carry extra fields.
+        size = 1
+        for chunk in json.JSONEncoder(allow_nan=False).iterencode(state):
+            size += len(chunk)
+            _check_limit(size, _MAX_SNAPSHOT_BYTES, "normalized snapshot size")
         return state
 
     def get_lights(self) -> dict:
@@ -403,9 +444,11 @@ class HueClient:
     def _normalize_v1_lights(self, lights: dict) -> dict:
         if not isinstance(lights, dict):
             raise HueError("Invalid Hue v1 lights response", "response")
+        _check_limit(len(lights), _MAX_LIGHTS, "light count")
         normalized = {}
         for light_id, light in lights.items():
             item = dict(light)
+            _bounded_name(item.get("name"))
             item["api_id"] = str(light_id)
             capabilities = item.get("capabilities") or {}
             control = capabilities.get("control") or {}
@@ -424,9 +467,15 @@ class HueClient:
     def _normalize_v1_groups(self, groups: dict) -> dict:
         if not isinstance(groups, dict):
             raise HueError("Invalid Hue v1 groups response", "response")
+        _check_limit(len(groups), _MAX_GROUPS, "group count")
         normalized = {}
         for group_id, group in groups.items():
             item = dict(group)
+            _bounded_name(item.get("name"))
+            members = item.get("lights", [])
+            if not isinstance(members, list):
+                raise HueError("Bridge returned invalid group members", "response")
+            _check_limit(len(members), _MAX_GROUP_MEMBERS, "group membership")
             item["api_id"] = str(group_id)
             item["control_id"] = str(group_id)
             normalized[str(group_id)] = item
@@ -441,8 +490,11 @@ class HueClient:
     def _normalize_v2(self, resources: list[dict]) -> dict:
         by_type: dict[str, list[dict]] = {}
         for resource in resources:
-            if isinstance(resource, dict):
-                by_type.setdefault(str(resource.get("type") or ""), []).append(resource)
+            if isinstance(resource, dict) and isinstance(resource.get("type"), str):
+                by_type.setdefault(resource["type"], []).append(resource)
+        _check_limit(len(by_type.get("light", [])), _MAX_LIGHTS, "light count")
+        group_count = len(by_type.get("room", [])) + len(by_type.get("zone", []))
+        _check_limit(group_count, _MAX_GROUPS, "group count")
 
         connectivity = {
             str((item.get("owner") or {}).get("rid")): item.get("status")
@@ -455,6 +507,7 @@ class HueClient:
             logical_id = _logical_id(resource, "lights")
             if not logical_id:
                 continue
+            name = _bounded_name((resource.get("metadata") or {}).get("name"), "Light %s" % logical_id)
             on = bool((resource.get("on") or {}).get("on"))
             dimming = resource.get("dimming") or {}
             has_bri = isinstance(dimming.get("brightness"), (int, float))
@@ -475,11 +528,10 @@ class HueClient:
                 red, green, blue = _xy_to_rgb(xy[0], xy[1])
                 hue01, saturation, _value = colorsys.rgb_to_hsv(red, green, blue)
                 hue, sat = round(hue01 * 65535), round(saturation * 254)
-            metadata = resource.get("metadata") or {}
             owner = resource.get("owner") or {}
             device_id = str(owner.get("rid") or "") if owner.get("rtype") == "device" else ""
             lights[logical_id] = {
-                "name": str(metadata.get("name") or "Light %s" % logical_id),
+                "name": name,
                 "api_id": str(resource.get("id") or logical_id),
                 "device_id": device_id,
                 "state": {
@@ -506,12 +558,19 @@ class HueClient:
                 logical_id = _logical_id(resource, "groups")
                 if not logical_id:
                     continue
+                name = _bounded_name((resource.get("metadata") or {}).get("name"), "%s %s" % (label, logical_id))
                 children = resource.get("children") or []
-                light_ids = []
-                for child in children:
-                    if isinstance(child, dict) and child.get("rtype") == "device":
-                        light_ids.extend(device_lights.get(str(child.get("rid") or ""), []))
-                light_ids = list(dict.fromkeys(light_ids))
+                if not isinstance(children, list):
+                    raise HueError("Bridge returned invalid group members", "response")
+                _check_limit(len(children), _MAX_GROUP_MEMBERS, "group membership")
+                devices = dict.fromkeys(
+                    str(child.get("rid") or "") for child in children
+                    if isinstance(child, dict) and child.get("rtype") == "device"
+                )
+                light_ids = list(dict.fromkeys(
+                    light_id for device in devices for light_id in device_lights.get(device, [])
+                ))
+                _check_limit(len(light_ids), _MAX_GROUP_MEMBERS, "group membership")
                 services = resource.get("services") or []
                 control_id = next((str(service.get("rid")) for service in services if isinstance(service, dict) and service.get("rtype") == "grouped_light"), "")
                 states = [bool(lights[item]["state"]["on"]) for item in light_ids if item in lights]
@@ -519,7 +578,7 @@ class HueClient:
                 any_on = any(states) if states else bool((aggregate.get("on") or {}).get("on"))
                 all_on = all(states) if states else any_on
                 groups[logical_id] = {
-                    "name": str((resource.get("metadata") or {}).get("name") or "%s %s" % (label, logical_id)),
+                    "name": name,
                     "type": label,
                     "api_id": str(resource.get("id") or logical_id),
                     "control_id": control_id,
@@ -593,15 +652,17 @@ class HueClient:
     def _normalize_v1_scenes(scenes, groups) -> dict:
         if not isinstance(scenes, dict) or not isinstance(groups, dict):
             raise HueError("Invalid Hue v1 scenes response", "response")
+        _check_limit(len(scenes), _MAX_SCENES, "scene count")
         normalized = {}
         for scene_id, scene in scenes.items():
             group_id = str(scene.get("group") or "")
             if not group_id:
                 continue
+            name = _bounded_name(scene.get("name"), "Scene %s" % scene_id)
             active_scene = str(((groups.get(group_id) or {}).get("action") or {}).get("scene") or "")
             normalized[str(scene_id)] = {
                 "id": str(scene_id), "api_id": str(scene_id),
-                "name": str(scene.get("name") or "Scene %s" % scene_id),
+                "name": name,
                 "group": group_id, "group_api_id": group_id,
                 "active": active_scene == str(scene_id),
             }
@@ -611,19 +672,20 @@ class HueClient:
     @_normalized_response
     def _normalize_v2_scenes(resources) -> dict:
         normalized = {}
-        for scene in resources:
-            if scene.get("type") != "scene":
-                continue
+        scenes = [resource for resource in resources if resource.get("type") == "scene"]
+        _check_limit(len(scenes), _MAX_SCENES, "scene count")
+        for scene in scenes:
             metadata = scene.get("metadata") or {}
             group = scene.get("group") or {}
             scene_id = str(scene.get("id") or "")
             group_id = str(group.get("rid") or "") if group.get("rtype") in ("room", "zone") else ""
             if not scene_id or not group_id:
                 continue
+            name = _bounded_name(metadata.get("name"), "Scene %s" % scene_id)
             normalized[scene_id] = {
                 "id": scene_id,
                 "api_id": scene_id,
-                "name": str(metadata.get("name") or "Scene %s" % scene_id),
+                "name": name,
                 "group": group_id,
                 "group_api_id": group_id,
                 "active": str((scene.get("status") or {}).get("active") or "inactive") != "inactive",
@@ -737,7 +799,7 @@ class HueClient:
 
     def apply_prebuilt_scene(self, name: str, room_id: str | None = None) -> tuple[int, int]:
         recipe = self._prebuilt_scene(name)
-        state = self.get_snapshot()
+        state = self._read_snapshot()
         scenes = state["scenes"]
         applied = 0
         targets = [(group_id, group) for group_id, group in state["groups"].items()
