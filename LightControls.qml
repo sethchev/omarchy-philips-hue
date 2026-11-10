@@ -41,7 +41,9 @@ Column {
       integer: true
       step: 10
       value: root.light.bri
-      onReleased: function(v) { root.controller.setBrightness(root.light.id, v) }
+      onReleased: function(v) {
+        if (!root.controller.setBrightness(root.light.id, v)) liveValue = value
+      }
     }
 
     Item {
@@ -97,6 +99,8 @@ Column {
     integer: true
     step: 10
     value: root.light.ct
-    onReleased: function(v) { root.controller.setColorTemperature(root.light.id, v) }
+    onReleased: function(v) {
+      if (!root.controller.setColorTemperature(root.light.id, v)) liveValue = value
+    }
   }
 }

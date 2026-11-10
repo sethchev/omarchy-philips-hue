@@ -327,6 +327,7 @@ function actionReplaceKey(command) {
 function connectionDiagnostic(stderr, exitCode, invalidSnapshot) {
   var code = "connection"
   if (exitCode === 124 || exitCode === 137) code = "timeout"
+  else if (exitCode === 126 || exitCode === 127) code = "helper"
   else if (invalidSnapshot) code = "response"
   else {
     var payload = parseJsonObject(stderr)
@@ -337,6 +338,7 @@ function connectionDiagnostic(stderr, exitCode, invalidSnapshot) {
     auth: ["Authentication failed", "Re-pair the bridge to renew access."],
     tls: ["TLS connection failed", "Check bridge identity and the system clock."],
     timeout: ["Bridge timed out", "Check the bridge and network, then retry."],
+    helper: ["Hue helper could not start", "Check that timeout and Python 3 are installed, then retry."],
     response: ["Invalid bridge response", "Retry; if it persists, check bridge firmware."],
     connection: ["Bridge unreachable", "Check bridge power, network, and configured IP."],
     request: ["Hue command failed", "Refresh and try again."]

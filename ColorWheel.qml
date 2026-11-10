@@ -18,11 +18,11 @@ Item {
   property real initialSat: 0
   signal colorSelected(real hue, real sat)
 
-  property real dragHue: initialHue
-  property real dragSat: initialSat
+  property real dragHue: 0
+  property real dragSat: 0
   property bool picking: false
-  onInitialHueChanged: if (!picking) dragHue = initialHue
-  onInitialSatChanged: if (!picking) dragSat = initialSat
+  readonly property real markerHue: picking ? dragHue : initialHue
+  readonly property real markerSat: picking ? dragSat : initialSat
 
   Image {
     anchors.fill: parent
@@ -39,11 +39,11 @@ Item {
     border.width: 2
     color: "transparent"
     x: root.width / 2
-       + Math.cos(-Math.PI / 2 + (root.dragHue / 65535) * 2 * Math.PI)
-         * (root.dragSat / 254) * (root.width / 2) - width / 2
+       + Math.cos(-Math.PI / 2 + (root.markerHue / 65535) * 2 * Math.PI)
+         * (root.markerSat / 254) * (root.width / 2) - width / 2
     y: root.height / 2
-       + Math.sin(-Math.PI / 2 + (root.dragHue / 65535) * 2 * Math.PI)
-         * (root.dragSat / 254) * (root.height / 2) - height / 2
+       + Math.sin(-Math.PI / 2 + (root.markerHue / 65535) * 2 * Math.PI)
+         * (root.markerSat / 254) * (root.height / 2) - height / 2
   }
 
   MouseArea {
@@ -62,6 +62,8 @@ Item {
     }
 
     onPressed: function(mouse) {
+      root.dragHue = root.initialHue
+      root.dragSat = root.initialSat
       root.picking = true
       apply(mouse.x, mouse.y)
     }

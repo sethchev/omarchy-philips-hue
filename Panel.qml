@@ -35,6 +35,7 @@ Panel {
   property int consecutiveFetchFailures: 0
   property string lastSuccessfulFetch: ""
   property var favoriteRooms: ({})
+  readonly property int maxQueuedActions: 16
   property var actionQueue: []
   property var currentAction: null
   property int stateRevision: 0
@@ -91,8 +92,7 @@ Panel {
   function toggleFavorite(roomId) {
     var favorites = JSON.parse(JSON.stringify(root.favoriteRooms))
     favorites[roomId] = favorites[roomId] !== true
-    root.favoriteRooms = favorites
-    root.runAction(HueApi.apiCmd(["write-favorite-config", JSON.stringify(favorites)]))
+    if (root.runAction(HueApi.apiCmd(["write-favorite-config", JSON.stringify(favorites)]))) root.favoriteRooms = favorites
   }
 
   function emptyRooms() {
@@ -164,6 +164,17 @@ Panel {
     proc.fetchReported = false
     proc.command = ["timeout", "--kill-after=2s", "30s"].concat(HueApi.apiCmd(args))
     proc.running = true
+  }
+
+  function checkFetchStart() {
+    // Quickshell signals runningChanged without exited or stream completion
+    // when the executable fails to start.
+    if (stateProc.running || stateProc.fetchExited || stateProc.fetchReported || root.pendingFetches === 0) return
+    stateProc.fetchExitCode = 127
+    stateProc.fetchExited = true
+    stateProc.fetchOutputFinished = true
+    stateProc.fetchErrorFinished = true
+    root.tryCompleteFetch(stateProc)
   }
 
   function tryCompleteFetch(proc) {
@@ -265,10 +276,11 @@ Panel {
   }
 
   function setRoomBrightness(roomId, bri) {
-    if (!root.config) return
+    if (!root.config) return false
     var target = root.roomById(roomId)
-    if (!target || !target.controlId) return
+    if (!target || !target.controlId) return false
     var clamped = Math.max(1, Math.min(254, Math.round(bri)))
+    if (!root.runAction(HueApi.apiCmd(["put-group", target.controlId, JSON.stringify({ bri: clamped })]))) return false
     var byId = root.lightClone(root.lightsById, {})
     for (var i = 0; i < target.lights.length; i++) {
       var light = target.lights[i]
@@ -276,7 +288,7 @@ Panel {
     }
     root.lightsById = byId
     root.assembleRooms()
-    root.runAction(HueApi.apiCmd(["put-group", target.controlId, JSON.stringify({ bri: clamped })]))
+    return true
   }
 
   function setLightOn(lightId, on) {
@@ -354,12 +366,16 @@ Panel {
     // Keep flushed values until their write completes: a config reload while
     // the write is in flight must not revert the visible option.
     var flushed = root.lightClone(root.flushedMusicOptions || {}, {})
+    var rejected = false
     for (var roomId in pending) {
-      flushed[roomId] = pending[roomId]
-      root.runAction(HueApi.apiCmd(["write-music-options", roomId, JSON.stringify(pending[roomId])]),
-        { musicRooms: [roomId] })
+      var options = pending[roomId]
+      if (root.runAction(HueApi.apiCmd(["write-music-options", roomId, JSON.stringify(options)]),
+        { musicRoom: roomId, musicOptions: options })) flushed[roomId] = options
+      else rejected = true
     }
     root.flushedMusicOptions = flushed
+    // Revert rejected drafts without reloading unrelated queued settings.
+    if (rejected) root.musicOptions = root.lightClone(root.savedMusicOptions, flushed)
   }
 
   function toggleParty(roomId) {
@@ -384,6 +400,8 @@ Panel {
     var item = ids[index]
     ids[index] = ids[next]
     ids[next] = item
+    if (!root.runAction(HueApi.apiCmd(["write-party-order", room.id, JSON.stringify(ids)]),
+      { partyOrderRoom: room.id })) return
     var order = JSON.parse(JSON.stringify(root.partyOrder || {}))
     order[room.id] = ids
     root.partyOrder = order
@@ -391,31 +409,55 @@ Panel {
     var pending = root.lightClone(root.pendingPartyOrder || {}, {})
     pending[room.id] = ids
     root.pendingPartyOrder = pending
-    root.runAction(HueApi.apiCmd(["write-party-order", room.id, JSON.stringify(ids)]),
-      { partyOrderRoom: room.id })
   }
 
   function applyThemeSettings(parsed) {
     root.themeSync = parsed.themeSync || {}
     root.favoriteRooms = parsed.favoriteRooms || {}
     root.partyOrder = root.lightClone(parsed.partyOrder || {}, root.pendingPartyOrder || {})
-    root.musicOptions = root.lightClone(root.lightClone(parsed.musicOptions || {},
+    root.savedMusicOptions = parsed.musicOptions || {}
+    root.musicOptions = root.lightClone(root.lightClone(root.savedMusicOptions,
       root.flushedMusicOptions || {}), root.pendingMusicOptions || {})
     root.sceneRooms = parsed.sceneRooms || {}
     root.sceneDefault = parsed.scene === true
   }
 
-  function clearOptimistic(musicRooms, partyOrderRoom) {
-    if (musicRooms.length > 0) {
-      var flushed = root.lightClone(root.flushedMusicOptions || {}, {})
-      for (var i = 0; i < musicRooms.length; i++) delete flushed[musicRooms[i]]
-      root.flushedMusicOptions = flushed
+  function clearOptimistic(context, failed) {
+    var roomId = context.musicRoom
+    if (roomId) {
+      if (!failed) {
+        var saved = root.lightClone(root.savedMusicOptions, {})
+        saved[roomId] = context.musicOptions
+        root.savedMusicOptions = saved
+      }
+      if (root.flushedMusicOptions[roomId] === context.musicOptions) {
+        var flushed = root.lightClone(root.flushedMusicOptions, {})
+        delete flushed[roomId]
+        root.flushedMusicOptions = flushed
+      }
     }
+    var partyOrderRoom = context.partyOrderRoom
     if (partyOrderRoom) {
       var pending = root.lightClone(root.pendingPartyOrder || {}, {})
       delete pending[partyOrderRoom]
       root.pendingPartyOrder = pending
     }
+  }
+
+  function toggleThemeSync(roomId) {
+    var settings = JSON.parse(JSON.stringify(root.themeSync))
+    var turningOn = settings[roomId] === false
+    settings[roomId] = turningOn
+    var sync = turningOn ? HueApi.apiCmd(["sync-room", roomId]) : null
+    if (root.runAction(HueApi.apiCmd(["write-theme-config", JSON.stringify(settings)]), null, sync)) {
+      root.themeSync = settings
+    }
+  }
+
+  function toggleSceneMode(roomId) {
+    var settings = JSON.parse(JSON.stringify(root.sceneRooms))
+    settings[roomId] = !root.roomSceneDefault(roomId)
+    if (root.runAction(HueApi.apiCmd(["write-scene-config", JSON.stringify(settings)]))) root.sceneRooms = settings
   }
 
   function roomSyncOn(roomId) {
@@ -492,11 +534,13 @@ Panel {
     if (!root.config) return
     var room = root.roomById(roomId)
     if (!room) return
+    var args = sceneId ? ["recall-scene", sceneId, room.controlId || room.id] : ["apply-scene", sceneName, roomId]
+    var id = root.runAction(HueApi.apiCmd(args), { roomId: roomId, sceneName: sceneName })
+    if (!id) return
     sceneStatusTimer.stop()
     root.sceneStatusRoomId = roomId
     root.sceneStatus = "Applying " + sceneName + "…"
-    var args = sceneId ? ["recall-scene", sceneId, room.controlId || room.id] : ["apply-scene", sceneName, roomId]
-    root.sceneActionId = root.runAction(HueApi.apiCmd(args), { roomId: roomId, sceneName: sceneName })
+    root.sceneActionId = id
   }
 
   function applySceneChoice(roomId, choice) {
@@ -513,55 +557,54 @@ Panel {
     if (!root.config) return
     var room = root.roomById(roomId)
     if (!room || !room.controlId) return
-    root.setRoomOn(roomId, on)
-    root.runAction(HueApi.apiCmd(["put-group", room.controlId, JSON.stringify({ on: on })]))
+    if (root.runAction(HueApi.apiCmd(["put-group", room.controlId, JSON.stringify({ on: on })]))) root.setRoomOn(roomId, on)
   }
 
   function toggleLight(lightId, on) {
     if (!root.config) return
     var light = root.lightById(lightId)
     if (!light) return
-    root.setLightOn(lightId, on)
-    root.runAction(HueApi.apiCmd(["put-light", light.apiId, JSON.stringify({ on: on })]))
+    if (root.runAction(HueApi.apiCmd(["put-light", light.apiId, JSON.stringify({ on: on })]))) root.setLightOn(lightId, on)
   }
 
   function setBrightness(lightId, bri) {
-    if (!root.config) return
+    if (!root.config) return false
     var light = root.lightById(lightId)
-    if (!light) return
+    if (!light) return false
     var clamped = Math.max(1, Math.min(254, Math.round(bri)))
+    if (!root.runAction(HueApi.apiCmd(["put-light", light.apiId, JSON.stringify({ bri: clamped })]))) return false
     root.setLightBri(lightId, clamped)
-    root.runAction(HueApi.apiCmd(["put-light", light.apiId, JSON.stringify({ bri: clamped })]))
+    return true
   }
 
   function setColorTemperature(lightId, ct) {
-    if (!root.config) return
+    if (!root.config) return false
     var light = root.lightById(lightId)
-    if (!light) return
+    if (!light) return false
     var clamped = Math.max(light.ctMin, Math.min(light.ctMax, Math.round(ct)))
+    if (!root.runAction(HueApi.apiCmd(["put-light", light.apiId, JSON.stringify({ ct: clamped })]))) return false
     root.setLightCt(lightId, clamped)
-    root.runAction(HueApi.apiCmd(["put-light", light.apiId, JSON.stringify({ ct: clamped })]))
+    return true
   }
 
   function setLightColor(lightId, hue, sat) {
     if (!root.config) return
     var light = root.lightById(lightId)
     if (!light) return
-    root.patchLightColor(lightId, hue, sat)
     var args = ["put-light", light.apiId, JSON.stringify({ hue: hue, sat: sat })]
     if (root.config.apiVersion === "v2" && HueApi.isObject(light.gamut)) args.push(JSON.stringify(light.gamut))
-    root.runAction(HueApi.apiCmd(args))
+    if (root.runAction(HueApi.apiCmd(args))) root.patchLightColor(lightId, hue, sat)
   }
 
   function toggleAll(on) {
     if (!root.config || root.lightTotal === 0) return
     var ids = Object.keys(root.lightsById).map(function(id) { return root.lightsById[id].apiId })
-    root.setAllOn(on)
     var body = JSON.stringify({ on: on })
     // The bridge-wide service covers orphans and avoids duplicate zone writes.
-    root.runAction(root.allControlId
+    var command = root.allControlId
       ? HueApi.apiCmd(["put-group", root.allControlId, body])
-      : HueApi.apiCmd(["put-all", JSON.stringify(ids), body]))
+      : HueApi.apiCmd(["put-all", JSON.stringify(ids), body])
+    if (root.runAction(command)) root.setAllOn(on)
   }
 
   function setAllOn(on) {
@@ -571,16 +614,23 @@ Panel {
     root.assembleRooms()
   }
 
-  function runAction(command, context) {
-    root.stateRevision++
-    root.actionError = ""
-    var id = root.stateRevision
-    var action = { id: id, command: command, context: context || {}, replaceKey: HueApi.actionReplaceKey(command) }
+  function runAction(command, context, followup) {
+    var replaceKey = HueApi.actionReplaceKey(command)
     var last = root.actionQueue.length - 1
-    if (last >= 0 && action.replaceKey && root.actionQueue[last].replaceKey === action.replaceKey) {
-      root.actionQueue[last] = action
-    } else root.actionQueue.push(action)
-    drainActionQueue()
+    var replaceTail = !followup && last >= 0 && replaceKey && root.actionQueue[last].replaceKey === replaceKey
+    var extra = replaceTail ? 0 : (followup ? 2 : 1)
+    if (root.actionQueue.length + extra > root.maxQueuedActions) {
+      root.actionError = "Hue command queue is full. Try again when pending commands finish."
+      return 0
+    }
+
+    var id = ++root.stateRevision
+    root.actionError = ""
+    var action = { id: id, command: command, context: context || {}, replaceKey: replaceKey }
+    if (replaceTail) root.actionQueue[last] = action
+    else root.actionQueue.push(action)
+    if (followup) root.actionQueue.push({ id: ++root.stateRevision, command: followup, context: {}, replaceKey: "" })
+    root.drainActionQueue()
     return id
   }
 
@@ -599,13 +649,19 @@ Panel {
     actionProc.running = true
   }
 
+  function checkActionStart() {
+    if (actionProc.running || actionProc.actionExited || !root.currentAction) return
+    actionProc.actionExitCode = 127
+    actionProc.actionExited = true
+    actionProc.actionOutputFinished = true
+    root.tryCompleteAction()
+  }
+
   function tryCompleteAction() {
     if (!root.currentAction || !actionProc.actionExited || !actionProc.actionOutputFinished) return
     var context = root.currentAction.context
-    if (context.musicRooms || context.partyOrderRoom) {
-      root.clearOptimistic(context.musicRooms || [], context.partyOrderRoom)
-    }
     var failed = actionProc.actionExitCode !== 0
+    if (context.musicRoom || context.partyOrderRoom) root.clearOptimistic(context, failed)
     if (failed) {
       var diagnostic = HueApi.connectionDiagnostic(actionProc.errorOutput, actionProc.actionExitCode, false)
       root.actionError = diagnostic.label + ". " + diagnostic.hint
@@ -653,6 +709,7 @@ Panel {
   property var musicBeats: ({})
   property var musicTracking: ({})
   property var musicOptions: ({})
+  property var savedMusicOptions: ({})
   property var pendingMusicOptions: ({})
   property var flushedMusicOptions: ({})
   property var partyLightIds: []
@@ -790,6 +847,7 @@ Panel {
         root.tryCompleteFetch(stateProc)
       }
     }
+    onRunningChanged: if (!running) Qt.callLater(root.checkFetchStart)
     onExited: function(exitCode) {
       fetchExitCode = exitCode
       fetchExited = true
@@ -811,6 +869,7 @@ Panel {
         root.tryCompleteAction()
       }
     }
+    onRunningChanged: if (!running) Qt.callLater(root.checkActionStart)
     onExited: function(code) {
       actionExitCode = code
       actionExited = true
@@ -1196,7 +1255,9 @@ Panel {
                     integer: true
                     step: 10
                     value: root.roomBrightness(roomColumn.modelData)
-                    onReleased: function(v) { root.setRoomBrightness(roomColumn.modelData.id, v) }
+                    onReleased: function(v) {
+                      if (!root.setRoomBrightness(roomColumn.modelData.id, v)) liveValue = value
+                    }
                   }
                 }
 
@@ -1214,16 +1275,7 @@ Panel {
                     foreground: root.bar.foreground
                     accent: Commons.Color.accent
                     fontFamily: root.bar.fontFamily
-                    onClicked: {
-                      var ts = JSON.parse(JSON.stringify(root.themeSync))
-                      var turningOn = ts[modelData.id] === false
-                      ts[modelData.id] = turningOn
-                      root.themeSync = ts
-                      root.runAction(HueApi.apiCmd(["write-theme-config", JSON.stringify(ts)]))
-                      if (turningOn) {
-                        root.runAction(HueApi.apiCmd(["sync-room", modelData.id]))
-                      }
-                    }
+                    onClicked: root.toggleThemeSync(modelData.id)
                   }
 
                   InlineToggle {
@@ -1234,12 +1286,7 @@ Panel {
                     foreground: root.bar.foreground
                     accent: Commons.Color.accent
                     fontFamily: root.bar.fontFamily
-                    onClicked: {
-                      var ss = JSON.parse(JSON.stringify(root.sceneRooms))
-                      ss[modelData.id] = !root.roomSceneDefault(modelData.id)
-                      root.sceneRooms = ss
-                      root.runAction(HueApi.apiCmd(["write-scene-config", JSON.stringify(ss)]))
-                    }
+                    onClicked: root.toggleSceneMode(modelData.id)
                   }
                 }
 
@@ -1642,16 +1689,7 @@ Panel {
                       foreground: root.bar.foreground
                       accent: Commons.Color.accent
                       fontFamily: root.bar.fontFamily
-                      onClicked: {
-                        var ts = JSON.parse(JSON.stringify(root.themeSync))
-                        var turningOn = ts[modelData.id] === false
-                        ts[modelData.id] = turningOn
-                        root.themeSync = ts
-                        root.runAction(HueApi.apiCmd(["write-theme-config", JSON.stringify(ts)]))
-                        if (turningOn) {
-                          root.runAction(HueApi.apiCmd(["sync-room", modelData.id]))
-                        }
-                      }
+                      onClicked: root.toggleThemeSync(modelData.id)
                     }
                   }
                 }

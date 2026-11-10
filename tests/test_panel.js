@@ -22,11 +22,11 @@ function harness() {
     root: {
       config: {apiVersion: 'v2'}, lightsById: {}, allControlId: '', rooms: [], scenes: [],
       roomsWithLights: [], orphanLights: [], pickerOpenById: {}, favoriteRooms: {},
-      actionQueue: [], currentAction: null, stateRevision: 0, pendingFetches: 0,
+      maxQueuedActions: 16, actionQueue: [], currentAction: null, stateRevision: 0, pendingFetches: 0,
       fetchScheduled: false, refreshRequested: false, loading: false,
       lastFetchFailed: false, consecutiveFetchFailures: 0,
       lastSuccessfulFetch: 'previous', sceneStatus: '', sceneStatusRoomId: '',
-      actionError: '', opened: true, fetchDiagnostic: null,
+      actionError: '', opened: true, fetchDiagnostic: null, savedMusicOptions: {},
       sceneQueries: {}, scenePages: {}, scenePageSize: 6, prebuiltScenes: ['Relax', 'Read', 'Natural Light', 'Tv Mode']
     }
   };
@@ -227,6 +227,102 @@ test('timed-out commands release the queue and report a useful error', () => {
   assert.equal(h.resyncTimer.count, 1);
 });
 
+
+test('failed helper starts release fetch and action bookkeeping without stream or exit signals', () => {
+  const h = harness(); load(h);
+  const oldLights = h.root.lightsById;
+  h.root.refresh(); h.flush();
+  h.stateProc.running = false;
+  h.root.checkFetchStart();
+  h.root.checkFetchStart();
+  assert.equal(h.root.pendingFetches, 0);
+  assert.equal(h.root.fetchDiagnostic.code, 'helper');
+  assert.equal(h.root.lightsById, oldLights);
+  assert.equal(h.root.consecutiveFetchFailures, 1);
+  h.root.refresh(); h.flush();
+  Object.assign(h.stateProc, {running: false, fetchOutput: snapshot(),
+    fetchOutputFinished: true, fetchErrorFinished: true, fetchExited: true, fetchExitCode: 0});
+  h.root.tryCompleteFetch(h.stateProc);
+  h.root.checkFetchStart();
+  assert.equal(h.root.fetchDiagnostic, null);
+
+  h.root.applyScene('4', 'Relax');
+  h.root.toggleLight('2', true);
+  h.actionProc.running = false;
+  h.root.checkActionStart();
+  h.root.checkActionStart();
+  assert.match(h.root.actionError, /helper could not start/);
+  assert.equal(h.root.sceneStatus, 'Could not apply Relax');
+  assert.equal(h.themeConfigFile.count, 1);
+  h.flush();
+  assert.equal(h.actionProc.command[5], 'put-light');
+  completeAction(h);
+  assert.equal(h.root.currentAction, null);
+  assert.equal(h.resyncTimer.count, 1);
+});
+
+test('queue admission preserves the FIFO, permits tail replacement, and rejects optimistic updates', () => {
+  const h = harness(); load(h);
+  h.root.themeSync = {4: false};
+  h.root.toggleLight('1', false);
+  for (let i = 0; i < h.root.maxQueuedActions - 1; i++) h.root.toggleLight('1', true);
+  const revision = h.root.stateRevision;
+  h.root.toggleThemeSync('4');
+  assert.equal(h.root.themeSync['4'], false);
+  assert.equal(h.root.stateRevision, revision);
+  h.root.setBrightness('1', 30);
+  h.root.toggleLight('2', true);
+  h.root.applyScene('4', 'Read');
+  h.root.toggleFavorite('4');
+  assert.equal(h.root.lightsById['2'].on, false);
+  assert.equal(h.root.favoriteRooms['4'], undefined);
+  assert.equal(h.root.sceneStatus, '');
+  assert.match(h.root.actionError, /queue is full/);
+  assert.equal(h.root.actionQueue.length, h.root.maxQueuedActions);
+  assert.equal(h.root.setRoomBrightness('4', 55), false);
+  assert.equal(h.root.setBrightness('2', 60), false);
+  assert.equal(h.root.setColorTemperature('1', 250), false);
+  assert.equal(h.root.setBrightness('1', 40), true);
+  assert.equal(h.root.actionQueue.length, h.root.maxQueuedActions);
+  assert.equal(h.root.lightsById['1'].bri, 40);
+  for (let i = 0; i < h.root.maxQueuedActions; i++) {
+    assert.equal(JSON.parse(h.actionProc.command[7]).on, i !== 0);
+    completeAction(h);
+  }
+  assert.deepEqual(JSON.parse(h.actionProc.command[7]), {bri: 40});
+  completeAction(h);
+  h.root.toggleThemeSync('4');
+  assert.equal(h.root.themeSync['4'], true);
+  assert.equal(h.actionProc.command[5], 'write-theme-config');
+  completeAction(h);
+  assert.equal(h.actionProc.command[5], 'sync-room');
+});
+
+test('rejected music drafts preserve queued favorites and admitted music options', () => {
+  const h = harness(); load(h);
+  h.root.applyThemeSettings({musicOptions: {4: {pace: 1}}});
+  h.root.toggleLight('1', false);
+  h.root.toggleLight('1', true);
+  h.root.toggleFavorite('4');
+  h.root.setMusicOption('4', 'pace', 1.5);
+  h.root.flushMusicOptions();
+  while (h.root.actionQueue.length < h.root.maxQueuedActions) h.root.toggleLight('1', true);
+
+  h.root.setMusicOption('4', 'pace', 2);
+  h.root.setMusicOption('5', 'pace', 2);
+  h.root.flushMusicOptions();
+  assert.match(h.root.actionError, /queue is full/);
+  assert.equal(h.root.musicOption('4', 'pace'), 1.5);
+  assert.equal(h.root.musicOption('5', 'pace'), 1);
+  assert.equal(h.themeConfigFile.count, 0);
+  assert.equal(h.root.favoriteRooms['4'], true);
+
+  completeAction(h);
+  h.root.toggleFavorite('5');
+  const command = h.root.actionQueue.at(-1).command;
+  assert.equal(command[2], 'write-favorite-config');
+  assert.deepEqual(JSON.parse(command[3]), {4: true, 5: true});
+});
 
 test('100 pending brightness changes launch only the first and latest helper', t => {
   const h = harness(); load(h);
