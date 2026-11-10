@@ -3,6 +3,7 @@ import copy
 import array
 import json
 import math
+import os
 import struct
 import sys
 import tempfile
@@ -49,6 +50,33 @@ class FixedTracker:
 
     def close(self):
         pass
+
+
+class DefaultSinkTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.bin = Path(directory.name)
+        (self.bin / 'pw-cat').symlink_to(sys.executable)
+        env = mock.patch.dict(os.environ, {'PATH': str(self.bin)})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def pactl(self, code):
+        script = self.bin / 'pactl'
+        script.write_text(f'#!{sys.executable}\nimport os, time\n{code}')
+        script.chmod(0o700)
+
+    def test_accepts_exact_byte_limits_on_both_pipes(self):
+        self.pactl("os.write(2, b'x' * 4096)\nos.write(1, b'fixture-sink\\n'.ljust(4096))\n")
+        self.assertEqual(music.default_sink(), 'fixture-sink')
+
+    def test_rejects_stdout_and_stderr_overflow_before_child_exit(self):
+        for fd in (1, 2):
+            with self.subTest(fd=fd):
+                self.pactl(f"os.write({fd}, b'x' * 4097)\ntime.sleep(30)\n")
+                with self.assertRaisesRegex(hue.HueError, 'exceeded the size limit'):
+                    music.default_sink()
 
 
 class AnalyzerTests(unittest.TestCase):
